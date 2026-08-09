@@ -1,0 +1,1302 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Renomeador de Documentos</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --border:#2a2f3a;
+    --text:#e8eaed; --muted:#9aa0ab; --accent:#4f8cff; --ok:#2ecc71; --warn:#f5a623; --err:#e74c3c;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--text);}
+  .wrap{max-width:1000px;margin:0 auto;padding:32px 20px 80px;}
+  h1{font-size:22px;text-align:center;margin:0 0 4px;}
+  .sub{text-align:center;color:var(--muted);font-size:13px;margin-bottom:28px;}
+  #drop{
+    border:2px dashed var(--border);border-radius:14px;padding:48px 20px;text-align:center;
+    background:var(--panel);cursor:pointer;transition:.15s;
+  }
+  #drop.drag{border-color:var(--accent);background:#182036;}
+  #drop .big{font-size:16px;margin-bottom:6px;}
+  #drop .small{color:var(--muted);font-size:12px;}
+  input[type=file]{display:none;}
+  #progressWrap{margin-top:18px;display:none;}
+  #progressLabel{font-size:12px;color:var(--muted);margin-bottom:6px;}
+  #progressBar{height:8px;background:var(--panel2);border-radius:6px;overflow:hidden;border:1px solid var(--border);}
+  #progressFill{height:100%;width:0%;background:var(--accent);transition:width .2s;}
+  table{width:100%;border-collapse:collapse;margin-top:24px;font-size:13px;}
+  th{text-align:left;color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em;padding:8px 10px;border-bottom:1px solid var(--border);}
+  td{padding:10px;border-bottom:1px solid var(--border);vertical-align:top;}
+  tr:hover td{background:var(--panel2);}
+  .orig{color:var(--muted);font-family:ui-monospace,Consolas,monospace;font-size:12px;word-break:break-all;}
+  .name{font-family:ui-monospace,Consolas,monospace;font-size:13px;}
+  .nameInput{width:100%;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-family:ui-monospace,Consolas,monospace;font-size:12px;}
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap;}
+  .badge.high{background:rgba(46,204,113,.15);color:var(--ok);}
+  .badge.low{background:rgba(245,166,35,.15);color:var(--warn);}
+  .badge.err{background:rgba(231,76,60,.15);color:var(--err);}
+  .fields{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.5;}
+  .fields b{color:#c7cad1;}
+  .status{font-size:11px;color:var(--muted);}
+  .actions{margin-top:24px;display:flex;justify-content:space-between;align-items:center;}
+  #count{color:var(--muted);font-size:13px;}
+  button{background:var(--accent);color:#fff;border:none;padding:11px 22px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;}
+  button:disabled{opacity:.4;cursor:not-allowed;}
+  button.secondary{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:6px 12px;font-size:12px;font-weight:500;}
+  .spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  #empty{text-align:center;color:var(--muted);font-size:12px;margin-top:40px;}
+  .linkBtn{background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;padding:0;cursor:pointer;margin-right:10px;text-decoration:underline;}
+  .linkBtn:hover{opacity:.8;}
+  .rowActions{margin-top:6px;}
+  .ocrDetails{margin-top:6px;}
+  .ocrDetails summary{cursor:pointer;color:var(--accent);font-size:11px;}
+  .ocrDetails pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:6px;font-size:11px;color:var(--muted);max-height:200px;overflow:auto;}
+  .rulehint{text-align:center;color:var(--muted);font-size:11px;margin-top:10px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>RENOMEADOR DE DOCUMENTOS</h1>
+  <div class="sub">Arraste PDFs digitalizados — leitura, identificação e renomeação automática, tudo no seu navegador.</div>
+
+  <div id="drop">
+    <div class="big">Arraste os PDFs para esta área</div>
+    <div class="small">ou clique para selecionar arquivos — processamento 100% local, nada é enviado à internet</div>
+    <input type="file" id="fileInput" accept="application/pdf" multiple>
+  </div>
+
+  <div id="progressWrap">
+    <div id="progressLabel">Processando...</div>
+    <div id="progressBar"><div id="progressFill"></div></div>
+  </div>
+
+  <div id="empty">Nenhum documento processado ainda.</div>
+
+  <table id="resultsTable" style="display:none">
+    <thead>
+      <tr>
+        <th style="width:22%">Arquivo original</th>
+        <th style="width:38%">Nome identificado</th>
+        <th style="width:12%">Confiança</th>
+        <th style="width:28%">Campos encontrados</th>
+      </tr>
+    </thead>
+    <tbody id="resultsBody"></tbody>
+  </table>
+
+  <div class="actions" id="actionsBar" style="display:none">
+    <div id="count"></div>
+    <div style="display:flex;gap:10px;">
+      <button id="clearBtn" class="secondary">LIMPAR LISTA / NOVO LOTE</button>
+      <button id="reviewBtn" class="secondary" style="display:none">REVISAR BAIXA CONFIANÇA</button>
+      <button id="downloadBtn">BAIXAR TODOS (.ZIP)</button>
+    </div>
+  </div>
+
+  <div class="actions" id="learnBar">
+    <div id="learnCount"></div>
+    <div style="display:flex;gap:10px;">
+      <button id="exportLearnBtn" class="secondary">EXPORTAR APRENDIZADO</button>
+      <button id="importLearnBtn" class="secondary">IMPORTAR APRENDIZADO</button>
+      <input type="file" id="importLearnInput" accept="application/json" style="display:none">
+    </div>
+  </div>
+
+  <div class="rulehint">As regras de nomenclatura ficam em <code>DOCUMENT_TYPES</code> e <code>CONDOMINIOS</code>, no início do script — edite/adicione ali conforme surgirem novos tipos de documento ou condomínios.</div>
+</div>
+
+<script>
+'use strict';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+/* ============================================================
+   CONFIGURAÇÃO — edite aqui para ensinar novos vocabulários
+   ============================================================
+   Calibrado a partir de 7 documentos reais digitalizados (protocolos de
+   entrega de boletos, fichas de reserva de salão, termos de requisição
+   com vistoria, e listas de proprietários). Todos eram PDFs só-imagem
+   (sem texto pesquisável) e vários vinham rotacionados 90°.
+*/
+
+// Condomínios conhecidos. Adicione novos nomes aqui (maiúsculo, como devem aparecer no nome do arquivo).
+// "aliases" são variações/erros de OCR que devem mapear para o nome canônico.
+// Isto é só um atalho de alta confiança — se o condomínio não estiver na lista,
+// o sistema ainda tenta extrair o nome do cabeçalho do documento (ver findCondominioFallback).
+const CONDOMINIOS = [
+  { nome: "VIA VERDE",             aliases: ["VIA VERDE"] },
+  { nome: "DOM PIETRO",             aliases: ["DOM PIETRO", "DOM PIETR0", "DOMPIETRO"] },
+  { nome: "VIVANT",                 aliases: ["VIVANT"] },
+  { nome: "MIRAGE",                 aliases: ["MIRAGE"] },
+  { nome: "PEROLA MAR",             aliases: ["PEROLA MAR", "PÉROLA MAR", "PEROLAMAR"] },
+  { nome: "ATMOSPHERA",             aliases: ["ATMOSPHERA", "ATMOSFERA"] },
+  { nome: "GRAND FORTUNE",          aliases: ["GRAND FORTUNE"] },
+  { nome: "NIRVANA",                aliases: ["NIRVANA"] },
+  { nome: "ALAMEDAS DAS MANGABEIRAS", aliases: ["ALAMEDAS DAS MANGABEIRAS"] },
+  { nome: "LIV RESIDENCE",          aliases: ["LIV RESIDENCE"] },
+  { nome: "JARDINS DE PROVENCE",    aliases: ["JARDINS DE PROVENCE"] },
+  { nome: "DUETTO",                 aliases: ["DUETTO"] },
+  { nome: "BELIEVE",                aliases: ["BELIEVE"] },
+  { nome: "HIT RESIDENCE",          aliases: ["HIT RESIDENCE"] },
+  { nome: "MONT REALE",             aliases: ["MONT REALE"] },
+  { nome: "MAISON DU VITRE",        aliases: ["MAISON DU VITRE"] },
+  { nome: "PIAZZA D'ITALIA",        aliases: ["PIAZZA D'ITALIA", "PIAZZA D ITALIA", "PIAZZA DITALIA"] },
+  { nome: "GRAND ROYALE",           aliases: ["GRAND ROYALE"] },
+  { nome: "INNOVARE",               aliases: ["INNOVARE"] },
+  { nome: "MARES DO SUL",           aliases: ["MARES DO SUL"] },
+  { nome: "CARUMAN",                aliases: ["CARUMAN"] },
+  { nome: "GRAND VERSAILLES",       aliases: ["GRAND VERSAILLES"] },
+  { nome: "ONE RESIDENCE",          aliases: ["ONE RESIDENCE"] },
+  { nome: "MAISON LA CONCORDE",     aliases: ["MAISON LA CONCORDE"] },
+  { nome: "HENRI MATISSE",          aliases: ["HENRI MATISSE"] },
+  { nome: "PALAZZO FIRENZE",        aliases: ["PALAZZO FIRENZE"] },
+  { nome: "SILVIA REGINA",          aliases: ["SILVIA REGINA"] },
+  // Documentos financeiros/administrativos (faturas, extratos, comprovantes) — segunda leva de exemplos
+  { nome: "ARQUIPELAGO DO SOL",     aliases: ["ARQUIPELAGO DO SOL", "ARQUIPÉLAGO DO SOL", "ARQUIP DO SOL", "ARQUIP. DO SOL", "ARQ. DO SOL", "ARQ DO SOL", "LOT. ARQ. DO SOL", "LT ARQUIPELAGO DO SOL"] },
+  { nome: "DON J DE SAN MARTIN",    aliases: ["DON J DE SAN MARTIN", "DON J SAN MARTIN", "EDIF DON J DE SAN MARTIN"] },
+  { nome: "MAISON SAINT TROPEZ",    aliases: ["MAISON SAINT TROPEZ"] },
+];
+
+const MESES = {
+  "JANEIRO":"JAN","FEVEREIRO":"FEV","MARÇO":"MAR","MARCO":"MAR","ABRIL":"ABR","MAIO":"MAI","JUNHO":"JUN",
+  "JULHO":"JUL","AGOSTO":"AGO","SETEMBRO":"SET","OUTUBRO":"OUT","NOVEMBRO":"NOV","DEZEMBRO":"DEZ"
+};
+
+const CONFIDENCE_THRESHOLD = 0.7; // abaixo disso vira "⚠ CONFERIR" e entra na fila do botão "revisar baixa confiança"
+const MIN_TEXT_LEN_TO_SKIP_OCR = 20; // se o PDF já tiver texto pesquisável com pelo menos isso, não faz OCR
+
+/* ============================================================
+   TIPOS DE DOCUMENTO — regras de negócio aprendidas dos exemplos reais
+   ============================================================
+   Cada detector é avaliado em ordem; o primeiro cujo `test` retornar true
+   decide o nome. São regras específicas (aprendidas de casos reais) antes
+   de regras genéricas de fallback — quanto mais específico, maior prioridade.
+
+   Para ensinar um novo tipo de documento: adicione um objeto novo neste
+   array, na posição adequada (regras mais específicas primeiro).
+*/
+const DOCUMENT_TYPES = [
+  {
+    // Planilha-mestre de reservas do fim de semana (várias linhas "TERMO", vários condomínios)
+    id: "reservas_fim_de_semana",
+    test: (norm) => /RESERVA\s+SAL[AÃ]O\s+DE\s+FESTA/.test(norm) && (norm.match(/\bTERMO\b/g) || []).length >= 3,
+    extract: () => ({}),
+    format: () => "RESERVAS FIM DE SEMANA",
+    confidence: () => 0.9
+  },
+  {
+    // Protocolo de entrega do setor de boletos (uma ou várias linhas de condomínio) — nome NUNCA leva condomínio.
+    // Teste tolerante a ruído de OCR: aceita tanto o título completo quanto a combinação de cabeçalhos de
+    // coluna típicos dessa tabela (CONDOMÍNIO/DESCRIÇÃO/ENVIADO/RECEBIDO), caso o título saia mal lido.
+    id: "protocolo_entrega_boletos",
+    test: (norm) => {
+      const semEspacos = norm.replace(/\s+/g, '');
+      if (/PROTOCOLO\s+DE\s+ENTREGA/.test(norm) || semEspacos.includes('PROTOCOLODEENTREGA')) return true;
+      // A linha de título nem sempre sobrevive ao OCR (fonte pequena/rotacionada). O conjunto de
+      // cabeçalhos de coluna sozinho já é uma "impressão digital" confiável desta tabela específica.
+      return /CONDOMINIO/.test(norm) && /DESCRI[CÇ][AÃ]O/.test(norm) && (/ENVIADO/.test(norm) || /RECEBIDO/.test(norm));
+    },
+    extract: (norm, raw) => ({ dataDDMM: findData(raw).dataDDMM }),
+    format: f => f.dataDDMM ? `PROTOCOLO ${f.dataDDMM}` : null,
+    confidence: f => f.dataDDMM ? 0.9 : 0.35
+  },
+  {
+    // Lista de proprietários/inquilinos usada como comprovante de entrega da taxa de condomínio
+    id: "lista_proprietarios_taxa",
+    test: (norm) => /(LISTA\s+DE\s+PROPRIETARIOS|PROPRIETARIOS\s*\/\s*INQUILINOS)/.test(norm) && /TAXA\s+DE\s+CONDOMINIO/.test(norm),
+    extract: (norm, raw) => {
+      const condominio = findCondominio(norm) || findCondominioFallback(raw);
+      // Nesta regra o nome final leva o mês por extenso (ex.: "JULHO"), não abreviado — é assim que aparece nos exemplos reais.
+      const m = norm.match(/TAXA\s+DE\s+CONDOMINIO\s*[-–]?\s*([A-Z]+)\s*\/\s*(\d{4})/);
+      const mesCompleto = m && MESES[m[1]] ? m[1] : null;
+      return { condominio, mesCompleto, ano: m ? m[2] : null };
+    },
+    format: f => f.condominio && f.mesCompleto ? `PROTOCOLO ${f.condominio} ${f.mesCompleto}` : null,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mesCompleto ? 0.4 : 0)
+  },
+  {
+    // Termo de requisição/responsabilidade COM vistoria estruturada (antes/depois da festa) — leva condomínio + data do uso.
+    // Sinal específico: "VISTORIA ... NO DIA DD/MM/AAAA" ou seção "ANTES DA FESTA" — não basta a palavra "vistoria" aparecer solta
+    // (pode ser só uma observação manuscrita em outro tipo de documento, como numa ficha de reserva).
+    id: "termo_com_vistoria",
+    test: (norm) => /VISTORIA[^.\n]{0,40}NO\s+DIA\s+\d{2}\D\d{2}\D\d{4}/.test(norm) || /ANTES\s+DA\s+FESTA/.test(norm),
+    extract: (norm, raw) => {
+      const condominio = findCondominio(norm) || findCondominioFallback(raw);
+      let m = raw.match(/NO\s+DIA\s+(\d{2}\D\d{2}\D\d{4})/i);
+      const dataDDMM = m ? findData(m[1]).dataDDMM : findData(raw).dataDDMM;
+      return { condominio, dataDDMM };
+    },
+    format: f => f.condominio && f.dataDDMM ? `TERMO ${f.condominio} ${f.dataDDMM}` : null,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
+  },
+  {
+    // Ficha de reserva / termo de requisição do salão de festas SEM vistoria estruturada — só protocolo + condomínio, sem data
+    id: "protocolo_reserva_salao",
+    test: (norm) => /(FICHA\s+DE\s+RESERVA|TERMO\s+DE\s+REQUISI[CÇ][AÃ]O)/.test(norm) && /SAL[AÃ]O\s+DE\s+FESTAS/.test(norm),
+    extract: (norm, raw) => ({ condominio: findCondominio(norm) || findCondominioFallback(raw) }),
+    format: f => f.condominio ? `PROTOCOLO RESERVA ${f.condominio}` : null,
+    confidence: f => f.condominio ? 0.85 : 0.3
+  },
+  {
+    // Lista de proprietários usada como comprovante genérico (sem "taxa de condomínio" explícita) — protocolo + condomínio
+    id: "lista_proprietarios_generico",
+    test: (norm) => /(LISTA\s+DE\s+PROPRIETARIOS|PROPRIETARIOS\s*\/\s*INQUILINOS)/.test(norm),
+    extract: (norm, raw) => ({ condominio: findCondominio(norm) || findCondominioFallback(raw) }),
+    format: f => f.condominio ? `PROTOCOLO ${f.condominio}` : null,
+    confidence: f => f.condominio ? 0.6 : 0.2
+  },
+  /* ---- Documentos financeiros/administrativos (faturas, extratos, comprovantes) ----
+     Categoria totalmente diferente dos protocolos/termos: sem "regra de conferência" própria
+     nos próprios documentos, o padrão de nome abaixo foi definido junto com o usuário. */
+  /* Nas 8 regras financeiras abaixo, o `format` NUNCA devolve null: uma vez que o `test` reconhece a
+     marca/sistema (Equatorial, Claro, Sicredi, cartório etc.), o documento fica "comprometido" com aquele
+     tipo — mesmo que falte campo, ele gera um nome parcial (ex.: "FATURA EQUATORIAL" sozinho) com confiança
+     baixa. Isso evita que uma extração mal-sucedida "escape" para uma regra genérica errada — foi assim que
+     rodapés de nota fiscal eletrônica ("Protocolo de autorização: ...") viraram "PROTOCOLO {condomínio}"
+     por engano em faturas de energia. As janelas de regex entre rótulo e valor (ex.: [\s\S]{0,25}?) são
+     propositalmente largas, porque o OCR costuma inserir espaços/quebras de linha extras entre os dois. */
+  {
+    // Fatura de energia elétrica (Equatorial). O mesmo condomínio pode ter vários medidores/UCs
+    // cobrados no mesmo mês — por isso o nome leva os 4 últimos dígitos da UC como diferenciador.
+    id: "fatura_energia_equatorial",
+    test: (norm) => norm.includes('EQUATORIAL'),
+    extract: (norm, raw) => {
+      const condominio = findCondominio(norm) || findCondominioFallback(raw);
+      const contaMes = raw.match(/CONTA\s*M[EÊ]S[\s\S]{0,15}?(\d{2})\s*\/\s*(\d{4})/i);
+      let mes = null, ano = null;
+      if (contaMes){
+        mes = mesPorNumero(contaMes[1]);
+        ano = contaMes[2];
+      } else {
+        // fallback: se "Conta Mês" não sair no OCR (comum — o QR code no meio da fatura quebra o layout e o
+        // texto entre o rótulo e o valor fica cheio de ruído), tenta de novo com janela bem mais larga antes
+        // de desistir e cair pro vencimento.
+        const contaMesLargo = raw.match(/CONTA\s*M[EÊ]S[\s\S]{0,60}?(\d{2})\s*\/\s*(\d{4})/i);
+        if (contaMesLargo){
+          mes = mesPorNumero(contaMesLargo[1]);
+          ano = contaMesLargo[2];
+        } else {
+          // último recurso: vencimento (1 mês depois do consumo, mas melhor que nada)
+          const venc = raw.match(/VENCIMENTO[\s\S]{0,40}?(\d{2})\D(\d{2})\D(\d{4})/i);
+          if (venc){ mes = mesPorNumero(venc[2]); ano = venc[3]; }
+        }
+      }
+      const uc = raw.match(/N[UÚ]MERO\s+DA\s+UC[\s\S]{0,10}?([\d.]{6,})/i);
+      const ucDigits = uc ? uc[1].replace(/\D/g, '') : null;
+      const ucSuffix = ucDigits ? ucDigits.slice(-4) : null;
+      return { condominio, mes, ano, ucSuffix };
+    },
+    format: f => `FATURA EQUATORIAL${f.condominio ? ' ' + f.condominio : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}${f.ucSuffix ? ' UC' + f.ucSuffix : ''}`,
+    confidence: f => (f.condominio ? 0.35 : 0.1) + (f.mes && f.ano ? 0.35 : 0) + (f.ucSuffix ? 0.2 : 0)
+  },
+  {
+    // Fatura de telecom (Claro Empresas) — usa o mês/ano do vencimento (não há "mês de referência" impresso).
+    id: "fatura_telecom_claro",
+    test: (norm) => /CLARO[\s\-]*EMPRESAS/.test(norm),
+    extract: (norm, raw) => {
+      const condominio = findCondominio(norm) || findCondominioFallback(raw);
+      const m = raw.match(/VENCIMENTO[\s\S]{0,20}?(\d{2}\D\d{2}\D\d{4})/i);
+      const d = m ? findData(m[1]) : { mes: null, ano: null };
+      return { condominio, mes: d.mes, ano: d.ano };
+    },
+    format: f => `FATURA CLARO${f.condominio ? ' ' + f.condominio : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
+  },
+  {
+    // Comprovante de pagamento via Pix (qualquer banco) — usa a data em que a transação foi realizada.
+    id: "comprovante_pix",
+    test: (norm) => (/PAGAMENTO\s+PIX/.test(norm) || semEspacos(norm).includes('PAGAMENTOPIX'))
+      && (/REALIZADO\s+EM/.test(norm) || semEspacos(norm).includes('REALIZADOEM')),
+    extract: (norm, raw) => {
+      const condominio = findCondominio(norm) || findCondominioFallback(raw);
+      const m = raw.match(/REALIZADO\s+EM[\s\S]{0,15}?(\d{2}\D\d{2}\D\d{4})/i);
+      const dataDDMM = m ? findData(m[1]).dataDDMM : null;
+      return { condominio, dataDDMM };
+    },
+    format: f => `COMPROVANTE PIX${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
+  },
+  {
+    // Comprovante de pagamento de boleto (sistema Sicredi de pagamentos) — usa a data do pagamento,
+    // extraída preferencialmente do campo PAGADOR (não do BENEFICIÁRIO, que é outra empresa/fornecedor).
+    // Não exige "SICREDI" no texto — é logotipo estilizado e o OCR quase nunca lê. A frase "Pagamento de
+    // Boletos" já é específica o bastante sozinha.
+    id: "comprovante_boleto_sicredi",
+    test: (norm) => /PAGAMENTO\s+DE\s+BOLETOS/.test(norm) || semEspacos(norm).includes('PAGAMENTODEBOLETOS'),
+    extract: (norm, raw) => {
+      // Nomes de condomínio às vezes quebram em 2 linhas no OCR (ex.: "MAISON SAINT\nTROPEZ") — captura
+      // uma janela maior e deixa o normalize() (que colapsa quebras de linha) juntar de volta.
+      const pagadorLine = raw.match(/PAGADOR[\s\S]{0,15}NOME[\s\S]{0,5}?([\s\S]{1,60})/i);
+      let condominio = null;
+      if (pagadorLine) condominio = findCondominio(normalize(pagadorLine[1])) || findCondominioFallback(pagadorLine[1]);
+      if (!condominio) condominio = findCondominio(norm) || findCondominioFallback(raw);
+      const m = raw.match(/DATA\s+D[OE]\s+PAGAMENTO[\s\S]{0,10}?(\d{2}\D\d{2}\D\d{4})/i);
+      const dataDDMM = m ? findData(m[1]).dataDDMM : null;
+      return { condominio, dataDDMM };
+    },
+    format: f => `COMPROVANTE BOLETO${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
+  },
+  {
+    // Extrato de conta corrente (sistema "Gerenciador Caixa") — usa o mês do período do extrato.
+    id: "extrato_conta_corrente",
+    test: (norm) => norm.includes('GERENCIADOR')
+      && (/EXTRATO\s+POR\s+PER[IÍ]ODO/.test(norm) || semEspacos(norm).includes('EXTRATOPORPERIODO')),
+    extract: (norm, raw) => {
+      const cliente = raw.match(/CLIENTE[\s\S]{0,5}?([^\n]+)/i);
+      let condominio = cliente ? (findCondominio(normalize(cliente[1])) || findCondominioFallback(cliente[1])) : null;
+      if (!condominio) condominio = findCondominio(norm) || findCondominioFallback(raw);
+      const m = raw.match(/M[EÊ]S[\s\S]{0,5}?([A-Zà-úÀ-Ú]+)\s*\/\s*(\d{4})/i);
+      const mes = m && MESES[normalize(m[1])] ? MESES[normalize(m[1])] : null;
+      const ano = m ? m[2] : null;
+      return { condominio, mes, ano };
+    },
+    format: f => `EXTRATO${f.condominio ? ' ' + f.condominio : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
+  },
+  {
+    // Extrato de aplicação/investimento (Sicredi) — usa o mês/ano do período de consulta.
+    // Idem: não depende de "SICREDI" (logotipo). "Extrato de Aplicação" + "Depósito a Prazo" juntos já bastam.
+    id: "extrato_aplicacao_sicredi",
+    test: (norm) => (/EXTRATO\s+DE\s+APLICA[CÇ][AÃ]O/.test(norm) || semEspacos(norm).includes('EXTRATODEAPLICACAO'))
+      && (/DEP[OÓ]SITO\s+A\s+PRAZO/.test(norm) || semEspacos(norm).includes('DEPOSITOAPRAZO')),
+    extract: (norm, raw) => {
+      const associado = raw.match(/ASSOCIADO[\s\S]{0,5}?([^\n]+)/i);
+      let condominio = associado ? (findCondominio(normalize(associado[1])) || findCondominioFallback(associado[1])) : null;
+      if (!condominio) condominio = findCondominio(norm) || findCondominioFallback(raw);
+      const m = raw.match(/PER[IÍ]ODO\s+DE\s+CONSULTA[\s\S]{0,10}?(\d{2})\s*\/\s*(\d{4})/i);
+      const mes = m ? mesPorNumero(m[1]) : null;
+      const ano = m ? m[2] : null;
+      return { condominio, mes, ano };
+    },
+    format: f => `EXTRATO APLICACAO${f.condominio ? ' ' + f.condominio : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
+  },
+  {
+    // Recibo de cartório — usa a data por extenso do rodapé ("Maceió - AL, ..., DD de MÊS de AAAA").
+    id: "recibo_cartorio",
+    test: (norm) => /CART[OÓ]RIO/.test(norm) && /RECIBO/.test(norm),
+    extract: (norm, raw) => {
+      const condominio = findCondominio(norm) || findCondominioFallback(raw);
+      const dataDDMM = findData(raw).dataDDMM;
+      return { condominio, dataDDMM };
+    },
+    format: f => `RECIBO CARTORIO${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
+  },
+  {
+    // Boleto de rateio interno do sistema "Recibo do Pagador" (ex.: Grand Bahama/Itaú) — um boleto por
+    // unidade/lote, por isso o nome leva a "Unidade" impressa como diferenciador. Se a unidade não for
+    // encontrada (campo mais sensível a ruído de OCR), a confiança cai para forçar conferência manual —
+    // é melhor pedir revisão do que arriscar sobrescrever o boleto de outra unidade com o mesmo nome.
+    // Teste tolerante: o layout de 2 colunas (Beneficiário | Unidade) às vezes faz o OCR intercalar texto
+    // no meio de "Recibo do Pagador", então checa as palavras separadamente em vez de exigir frase inteira.
+    id: "boleto_rateio_unidade",
+    test: (norm) => norm.includes('RECIBO') && norm.includes('PAGADOR') && norm.includes('UNIDADE') && norm.includes('BENEFICIARIO'),
+    extract: (norm, raw) => {
+      const condominio = findCondominio(norm) || findCondominioFallback(raw);
+      let m = raw.match(/RECIBO\s+DO\s+PAGADOR[\s\S]{0,30}?(\d{2})\s*\/\s*(\d{4})/i);
+      let mes = m ? mesPorNumero(m[1]) : null;
+      let ano = m ? m[2] : null;
+      if (!mes || !ano){
+        // fallback: usa o vencimento (o boleto costuma vencer no mês seguinte ao rateio, mas é melhor que nada)
+        const venc = raw.match(/VENCIMENTO[\s\S]{0,20}?(\d{2})\D(\d{2})\D(\d{4})/i);
+        if (venc){ mes = mesPorNumero(venc[2]); ano = venc[3]; }
+      }
+      // O código da unidade é curto (ex.: "CAYMAN ETA"). Se o que veio logo após "Unidade" for na verdade
+      // o início do parágrafo do beneficiário (nome de associação, endereço), descarta — layout de 2
+      // colunas confunde a ordem de leitura do OCR com frequência nesse tipo de documento.
+      // Classe de caracteres inclui acentos — sem isso, "ASSOCIAÇÃO" cortava em "ASSOCIA" antes do filtro
+      // de sanidade abaixo conseguir reconhecer a palavra inteira e descartá-la.
+      const u = raw.match(/UNIDADE[\s\S]{0,10}?([A-Za-zÀ-ÖØ-öø-ÿ0-9][A-Za-zÀ-ÖØ-öø-ÿ0-9 ]{1,24})/i);
+      let unidade = u ? normalize(u[1]).trim() : null;
+      // Se o trecho capturado contém (em qualquer posição, não só no início) uma dessas palavras, é o
+      // parágrafo do beneficiário vazando pro campo errado, não um código de unidade de verdade.
+      if (unidade && /ASSOCIA|CONDOMINIO|PROPRIETARIOS|MORADORES|LOTEAMENTO|BENEFICIARIO|\bRUA\b/.test(unidade)){
+        unidade = null;
+      }
+      return { condominio, mes, ano, unidade };
+    },
+    format: f => `BOLETO RATEIO${f.condominio ? ' ' + f.condominio : ''}${f.unidade ? ' ' + f.unidade : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
+    confidence: f => (f.condominio ? 0.35 : 0.1) + (f.mes && f.ano ? 0.35 : 0) + (f.unidade ? 0.2 : 0)
+  },
+  {
+    // Genérico: PROTOCOLO/TERMO + condomínio + data completa
+    id: "generico_tipo_condominio_data",
+    test: (norm) => !!findTipoGenerico(norm),
+    extract: (norm, raw) => ({
+      tipo: findTipoGenerico(norm),
+      condominio: findCondominio(norm) || findCondominioFallback(raw),
+      ...findData(raw)
+    }),
+    format: f => {
+      if (f.tipo && f.condominio && f.dataDDMM) return `${f.tipo} ${f.condominio} ${f.dataDDMM}`;
+      if (f.tipo && f.condominio && f.mes && f.ano) return `${f.tipo} ${f.condominio} ${f.mes} ${f.ano}`;
+      if (f.tipo && f.condominio) return `${f.tipo} ${f.condominio}`;
+      if (f.tipo && f.dataDDMM) return `${f.tipo} ${f.dataDDMM}`;
+      if (f.tipo && f.mes && f.ano) return `${f.tipo} ${f.mes} ${f.ano}`;
+      if (f.tipo) return f.tipo;
+      return null;
+    },
+    confidence: f => {
+      let score = 0.3;
+      if (f.tipo) score += 0.25;
+      if (f.condominio) score += 0.2;
+      if (f.dataDDMM || (f.mes && f.ano)) score += 0.2;
+      return score;
+    }
+  }
+];
+
+/* ============================================================
+   EXTRAÇÃO DE CAMPOS A PARTIR DO TEXTO
+   ============================================================ */
+
+function normalize(str){
+  return str.toUpperCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g,'') // remove acentos p/ casar com mais tolerância
+    .replace(/[\[\]{}|]/g, '') // remove ruído comum de OCR (colchetes/barras que não fazem parte do texto real)
+    .replace(/\s+/g, ' '); // colapsa quebras de linha/espaços múltiplos — OCR quebra nomes/frases no meio a toda hora
+}
+
+// Versão sem nenhum espaço, para checar frases que o OCR às vezes gruda inteiras (ex.: "ExtratodeAplicação").
+function semEspacos(norm){
+  return norm.replace(/[\s\-]+/g, '');
+}
+
+// Tipos genéricos de documento (fallback), usados apenas se nenhum detector específico casar.
+function findTipoGenerico(text){
+  // "Protocolo de autorização" é rodapé padrão de toda nota fiscal eletrônica (DANFE) — não é o tipo de
+  // documento "protocolo de entrega" que essa regra genérica tenta pegar. Se for a única ocorrência de
+  // "PROTOCOLO" no texto, ignora, senão qualquer fatura/conta de consumo vira "PROTOCOLO" por engano.
+  const semAutorizacao = text.replace(/PROTOCOLO\s+DE\s+AUTORIZA[CÇ][AÃ]O/g, '');
+  if (semAutorizacao.includes("PROTOCOLO")) return "PROTOCOLO";
+  if (text.includes("TERMO")) return "TERMO";
+  return null;
+}
+
+// Aprendizado por correção manual: quando o usuário renomeia um documento de baixa confiança/não
+// identificado indicando o condomínio, guardamos esse nome (e o trecho do cabeçalho que apareceu no
+// OCR) para reconhecer automaticamente da próxima vez. Fica só no navegador (localStorage) — nada sai
+// da máquina do usuário, e continua funcionando em sessões futuras no mesmo computador.
+const LEARNED_CONDOS_KEY = 'renomeador_condominios_aprendidos_v1';
+
+function loadLearnedCondominios(){
+  try {
+    const raw = localStorage.getItem(LEARNED_CONDOS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch(e){ return []; }
+}
+
+function saveLearnedCondominios(){
+  try { localStorage.setItem(LEARNED_CONDOS_KEY, JSON.stringify(learnedCondominios)); } catch(e){ /* localStorage indisponível — segue só na memória desta sessão */ }
+}
+
+let learnedCondominios = loadLearnedCondominios();
+
+// Registra (ou complementa) um condomínio aprendido manualmente. `nome` é o nome final que deve
+// aparecer no arquivo; `aliasSugerido` é o trecho reconhecido no cabeçalho do documento (pode ser null
+// se o OCR não deu pista nenhuma — nesse caso o nome vira alias de si mesmo).
+function aprenderCondominio(nome, aliasSugerido){
+  nome = (nome || '').trim().toUpperCase();
+  if (!nome) return;
+  let entry = learnedCondominios.find(c => c.nome === nome);
+  if (!entry){
+    entry = { nome, aliases: [nome] };
+    learnedCondominios.push(entry);
+  }
+  const alias = (aliasSugerido || '').trim().toUpperCase();
+  if (alias && !entry.aliases.includes(alias)) entry.aliases.push(alias);
+  saveLearnedCondominios();
+}
+
+function todosCondominios(){
+  return CONDOMINIOS.concat(learnedCondominios);
+}
+
+function findCondominio(text){
+  const lista = todosCondominios();
+  for (const c of lista){
+    for (const alias of c.aliases){
+      if (text.includes(normalize(alias))) return c.nome;
+    }
+  }
+  // Segunda passada tolerante a espaço: o OCR às vezes gruda o nome inteiro sem espaços
+  // (ex.: "MAISONSAINTTROPEZ"). Compara a versão sem espaços dos dois lados.
+  const semEspacosText = semEspacos(text);
+  for (const c of lista){
+    for (const alias of c.aliases){
+      if (semEspacosText.includes(semEspacos(normalize(alias)))) return c.nome;
+    }
+  }
+  return null;
+}
+
+// Fallback: quando o condomínio não está na whitelist, tenta extrair do cabeçalho do documento.
+// Cobre padrões como "CONDOMÍNIO EDIFÍCIO X", "CONDOMÍNIO DO EDIFÍCIO X", "EDF. X - ...".
+function findCondominioFallback(rawText){
+  let m = rawText.match(/CONDOM[IÍ]NIO\s+(?:DO\s+)?ED[IÍ]F[IÍ]CIO\s+([A-Za-zÀ-ÖØ-öø-ÿ'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
+  if (m) return m[1].trim().toUpperCase();
+  m = rawText.match(/EDF\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ'\s]{2,40}?)\s*[-–]/i);
+  if (m) return m[1].trim().toUpperCase();
+  // Formas abreviadas comuns em extrato/gerenciador de caixa: "COND DO EDIF X", "COND. EDIF. X", "EDIF. X"
+  m = rawText.match(/COND\.?\s+(?:DO\s+)?EDIF\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
+  if (m) return m[1].trim().toUpperCase();
+  m = rawText.match(/\bEDIF\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
+  if (m) return m[1].trim().toUpperCase();
+  return null;
+}
+
+// Procura datas em formatos DD/MM/AAAA, DD-MM-AAAA, DD.MM.AAAA, DD/MM, "05 de julho de 2026" etc.
+function findData(rawText){
+  // dd/mm/aaaa ou dd-mm-aaaa ou dd.mm.aaaa
+  let m = rawText.match(/\b([0-3]?\d)[\/\-\.]([0-1]?\d)[\/\-\.](\d{4}|\d{2})\b/);
+  if (m){
+    const dd = m[1].padStart(2,'0');
+    const mm = m[2].padStart(2,'0');
+    let yyyy = m[3];
+    if (yyyy.length === 2) yyyy = '20' + yyyy;
+    return { dataDDMM: `${dd}.${mm}`, mes: mesPorNumero(mm), ano: yyyy };
+  }
+  // dd/mm sem ano
+  m = rawText.match(/\b([0-3]?\d)[\/\-\.]([0-1]?\d)\b/);
+  if (m){
+    const dd = m[1].padStart(2,'0');
+    const mm = m[2].padStart(2,'0');
+    return { dataDDMM: `${dd}.${mm}`, mes: mesPorNumero(mm), ano: null };
+  }
+  // "05 de julho de 2026" / "5 DE JULHO DE 2026"
+  const normText = normalize(rawText);
+  m = normText.match(/\b([0-3]?\d)\s+DE\s+([A-Z]+)\s+DE\s+(\d{4})\b/);
+  if (m){
+    const dd = m[1].padStart(2,'0');
+    const mesNome = m[2];
+    const mes = MESES[mesNome] || null;
+    const ano = m[3];
+    if (mes){
+      const mmNum = numeroPorMesAbrev(mes);
+      return { dataDDMM: mmNum ? `${dd}.${mmNum}` : null, mes: mes, ano };
+    }
+  }
+  // Só mês/ano por extenso: "JULHO DE 2026" / "JULHO/2026"
+  m = normText.match(/\b([A-Z]+)\s*(?:DE|\/)\s*(\d{4})\b/);
+  if (m && MESES[m[1]]){
+    return { dataDDMM: null, mes: MESES[m[1]], ano: m[2] };
+  }
+  return { dataDDMM: null, mes: null, ano: null };
+}
+
+function mesPorNumero(mm){
+  const nums = {"01":"JAN","02":"FEV","03":"MAR","04":"ABR","05":"MAI","06":"JUN","07":"JUL","08":"AGO","09":"SET","10":"OUT","11":"NOV","12":"DEZ"};
+  return nums[mm] || null;
+}
+function numeroPorMesAbrev(abrev){
+  const map = {"JAN":"01","FEV":"02","MAR":"03","ABR":"04","MAI":"05","JUN":"06","JUL":"07","AGO":"08","SET":"09","OUT":"10","NOV":"11","DEZ":"12"};
+  return map[abrev] || null;
+}
+
+// Campos "extra" apenas informativos (não entram no nome, mas aparecem na conferência)
+function findExtras(rawText){
+  const extras = {};
+  let m = rawText.match(/APTO?\.?\s*n?º?\s*[:\-]?\s*(\d{1,4}[A-Za-z]?)/i);
+  if (m) extras.apartamento = m[1];
+  m = rawText.match(/PROTOCOLO\s*n?º?\s*[:\-]?\s*(\d{2,8})/i);
+  if (m) extras.numeroProtocolo = m[1];
+  return extras;
+}
+
+// Roda os detectores de DOCUMENT_TYPES em ordem e devolve o primeiro que produzir um nome válido.
+function identifyDocument(rawText, ocrConfidence){
+  const norm = normalize(rawText);
+  const extras = findExtras(rawText);
+
+  for (const docType of DOCUMENT_TYPES){
+    if (!docType.test(norm)) continue;
+    const fields = docType.extract(norm, rawText);
+    const nome = docType.format(fields);
+    if (!nome) continue; // detector reconheceu o tipo mas faltou campo obrigatório -> tenta o próximo (mais genérico)
+    let confidence = docType.confidence(fields);
+    if (ocrConfidence != null) confidence = confidence * (0.5 + 0.5 * ocrConfidence); // penaliza OCR ruim
+    confidence = Math.min(confidence, 1);
+    return { nome, confidence, ruleId: docType.id, fields: { ...fields, ...extras } };
+  }
+  return { nome: null, confidence: 0, ruleId: null, fields: extras };
+}
+
+/* ============================================================
+   LEITURA DE PDF: TEXTO NATIVO -> OCR (fallback, com correção de rotação)
+   ============================================================
+   Os documentos reais analisados eram todos PDFs só-imagem (sem texto
+   pesquisável) e vários vinham com o conteúdo rotacionado 90° (comum em
+   digitalizações feitas com o celular deitado). Por isso: se o primeiro
+   OCR (0°) sair curto ou pouco confiável, tenta 90/180/270° e fica com
+   o melhor resultado.
+*/
+
+async function renderPageToCanvas(page, scale){
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext('2d');
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas;
+}
+
+// Digitalizações feitas com celular costumam sair com contraste ruim (sombra, papel amarelado, luz desigual).
+// Aqui: converte pra escala de cinza e "estica" o contraste (o pixel mais escuro vira preto, o mais claro vira
+// branco), o que costuma melhorar bastante a precisão do OCR em texto pequeno sem destruir assinaturas/rasuras
+// (não é uma binarização dura — mantém tons de cinza).
+function preprocessCanvasForOCR(canvas){
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const d = imgData.data;
+  const n = w * h;
+  const gray = new Uint8ClampedArray(n);
+  let min = 255, max = 0;
+  for (let i = 0, p = 0; i < d.length; i += 4, p++){
+    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    gray[p] = g;
+    if (g < min) min = g;
+    if (g > max) max = g;
+  }
+  const range = Math.max(max - min, 1);
+  for (let i = 0, p = 0; i < d.length; i += 4, p++){
+    const v = Math.round((gray[p] - min) / range * 255);
+    d[i] = d[i + 1] = d[i + 2] = v;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas;
+}
+
+// Worker do Tesseract reaproveitado entre todas as chamadas (evita recarregar o modelo de idioma a cada
+// rotação/arquivo) e configurado para PSM 6 ("bloco único de texto"), que costuma funcionar melhor que o
+// modo automático em tabelas com linhas/colunas — o padrão predominante nos documentos deste fluxo.
+let tesseractWorkerPromise = null;
+async function getTesseractWorker(){
+  if (!tesseractWorkerPromise){
+    tesseractWorkerPromise = (async () => {
+      const worker = await Tesseract.createWorker('por');
+      await worker.setParameters({ tessedit_pageseg_mode: '6' });
+      return worker;
+    })();
+  }
+  return tesseractWorkerPromise;
+}
+
+function rotateCanvas(srcCanvas, degrees){
+  if (degrees === 0) return srcCanvas;
+  const rad = degrees * Math.PI / 180;
+  const swap = degrees === 90 || degrees === 270;
+  const out = document.createElement('canvas');
+  out.width = swap ? srcCanvas.height : srcCanvas.width;
+  out.height = swap ? srcCanvas.width : srcCanvas.height;
+  const ctx = out.getContext('2d');
+  ctx.translate(out.width / 2, out.height / 2);
+  ctx.rotate(rad);
+  ctx.drawImage(srcCanvas, -srcCanvas.width / 2, -srcCanvas.height / 2);
+  return out;
+}
+
+const OCR_KEYWORDS = ["PROTOCOLO","TERMO","CONDOMINIO","RESERVA","VISTORIA","BOLETO","TAXA","DESCRICAO","ENVIADO","RECEBIDO","SALAO","FESTA","ENTREGA"];
+
+function ocrLooksGood(text, confidence){
+  if (!text || text.trim().length < 15) return false;
+  if (confidence < 40) return false;
+  const norm = normalize(text);
+  // se reconhecer qualquer palavra-chave de negócio, já é sinal forte de que a rotação está correta
+  return OCR_KEYWORDS.some(k => norm.includes(k));
+}
+
+// A confiança bruta do Tesseract mede "quão certo ele está de cada caractere", não se o texto faz sentido.
+// Uma rotação errada pode gerar letras nítidas porém sem nexo e "ganhar" na confiança pura. Por isso a
+// escolha da melhor rotação usa confiança + um bônus por reconhecer palavras-chave de negócio e datas —
+// isso pesa a favor da leitura que realmente faz sentido, não só da mais "nítida".
+function ocrQualityScore(text, confidence){
+  const norm = normalize(text || '');
+  let bonus = 0;
+  for (const k of OCR_KEYWORDS) if (norm.includes(k)) bonus += 12;
+  if (/\d{1,2}\D\d{1,2}\D\d{2,4}/.test(norm)) bonus += 15;
+  return (confidence || 0) + bonus;
+}
+
+async function ocrWithAutoRotate(canvas0){
+  const worker = await getTesseractWorker();
+  let best = null;
+  for (const degrees of [0, 90, 180, 270]){
+    const canvas = rotateCanvas(canvas0, degrees);
+    const { data } = await worker.recognize(canvas);
+    const confidence = data.confidence || 0;
+    const text = data.text || '';
+    if (canvas !== canvas0) canvas.remove();
+    const score = ocrQualityScore(text, confidence);
+    if (!best || score > best.score) best = { text, confidence, degrees, score };
+    if (ocrLooksGood(text, confidence)) break; // já achou uma rotação boa, não precisa testar as outras
+  }
+  return best;
+}
+
+// Renderiza a 1ª página do PDF já com o contraste reforçado — usado tanto na leitura normal quanto na revisão.
+async function renderPreprocessedPage(file, scale){
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const page = await pdf.getPage(1);
+  const canvas = await renderPageToCanvas(page, scale);
+  preprocessCanvasForOCR(canvas);
+  return canvas;
+}
+
+async function extractPdfText(file){
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let text = '';
+  const maxPages = Math.min(pdf.numPages, 3); // primeiras páginas costumam ter os dados relevantes
+  for (let i = 1; i <= maxPages; i++){
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(it => it.str).join(' ') + '\n';
+  }
+
+  if (text.trim().length >= MIN_TEXT_LEN_TO_SKIP_OCR){
+    return { text, ocrConfidence: null, usedOCR: false };
+  }
+
+  // fallback: OCR na primeira página, com contraste reforçado e testando rotações se necessário
+  const canvas = await renderPreprocessedPage(file, 3.0);
+  const best = await ocrWithAutoRotate(canvas);
+  canvas.remove();
+  return { text: best.text, ocrConfidence: (best.confidence || 0) / 100, usedOCR: true, rotationUsed: best.degrees };
+}
+
+/* ============================================================
+   REVISÃO PROFUNDA (sob demanda, só para documentos com confiança baixa)
+   ============================================================
+   Mais lenta de propósito: além das 4 rotações, testa 3 modos de segmentação
+   de página do Tesseract (bloco único, coluna única, automático) — o modo
+   ideal varia conforme o layout do documento (tabela vs. texto corrido vs.
+   formulário). É custoso demais pra rodar em todo documento por padrão, por
+   isso fica atrás do botão "revisar baixa confiança", disparado manualmente.
+*/
+const REVIEW_PSM_MODES = ['6', '4', '3']; // 6=bloco único, 4=coluna única, 3=automático
+
+async function ocrDeepReview(canvas0){
+  const worker = await getTesseractWorker();
+  let best = null;
+  for (const psm of REVIEW_PSM_MODES){
+    await worker.setParameters({ tessedit_pageseg_mode: psm });
+    for (const degrees of [0, 90, 180, 270]){
+      const canvas = rotateCanvas(canvas0, degrees);
+      const { data } = await worker.recognize(canvas);
+      const confidence = data.confidence || 0;
+      const text = data.text || '';
+      if (canvas !== canvas0) canvas.remove();
+      const score = ocrQualityScore(text, confidence);
+      if (!best || score > best.score) best = { text, confidence, degrees, psm, score };
+    }
+  }
+  await worker.setParameters({ tessedit_pageseg_mode: '6' }); // restaura o padrão usado no fluxo normal
+  return best;
+}
+
+// Roda a revisão profunda para UM documento e devolve o resultado atualizado (ou null se não deu pra melhorar).
+async function reviewDocument(row){
+  if (!row.usedOCR){
+    // Texto nativo (não veio de OCR) — o texto já é o que é; revisar de novo não muda nada.
+    // O que falta aqui é vocabulário (condomínio/tipo não reconhecido), não qualidade de leitura.
+    return null;
+  }
+  const canvas = await renderPreprocessedPage(row.originalFile, 3.5); // resolução ainda maior na revisão
+  const best = await ocrDeepReview(canvas);
+  canvas.remove();
+  if (!best) return null;
+  const ocrConfidence = (best.confidence || 0) / 100;
+  const result = identifyDocument(best.text, ocrConfidence);
+  return { text: best.text, ocrConfidence, rotationUsed: best.degrees, psmUsed: best.psm, result };
+}
+
+/* ============================================================
+   UI / ORQUESTRAÇÃO
+   ============================================================ */
+
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('fileInput');
+const progressWrap = document.getElementById('progressWrap');
+const progressLabel = document.getElementById('progressLabel');
+const progressFill = document.getElementById('progressFill');
+const resultsTable = document.getElementById('resultsTable');
+const resultsBody = document.getElementById('resultsBody');
+const empty = document.getElementById('empty');
+const actionsBar = document.getElementById('actionsBar');
+const countEl = document.getElementById('count');
+const downloadBtn = document.getElementById('downloadBtn');
+const clearBtn = document.getElementById('clearBtn');
+const reviewBtn = document.getElementById('reviewBtn');
+const learnCount = document.getElementById('learnCount');
+const exportLearnBtn = document.getElementById('exportLearnBtn');
+const importLearnBtn = document.getElementById('importLearnBtn');
+const importLearnInput = document.getElementById('importLearnInput');
+
+let items = []; // { id, originalFile, originalName, suggestedName, confidence, fields, status, error }
+let usedNames = new Set();
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.classList.remove('drag');
+  handleFiles([...e.dataTransfer.files].filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')));
+});
+fileInput.addEventListener('change', e => {
+  handleFiles([...e.target.files]);
+  fileInput.value = '';
+});
+
+function uniqueName(base){
+  let candidate = base;
+  let n = 2;
+  while (usedNames.has(candidate.toUpperCase())){
+    candidate = `${base} (${n})`;
+    n++;
+  }
+  usedNames.add(candidate.toUpperCase());
+  return candidate;
+}
+
+async function handleFiles(files){
+  if (!files.length) return;
+  empty.style.display = 'none';
+  resultsTable.style.display = 'table';
+  actionsBar.style.display = 'flex';
+  progressWrap.style.display = 'block';
+
+  let done = 0;
+  const total = files.length;
+  updateProgress(done, total);
+
+  for (const file of files){
+    const id = 'f' + Math.random().toString(36).slice(2);
+    const row = { id, originalFile: file, originalName: file.name, suggestedName: null, confidence: 0, fields: {}, status: 'processing', error: null };
+    items.push(row);
+    renderRow(row);
+
+    try {
+      const { text, ocrConfidence, usedOCR, rotationUsed } = await extractPdfText(file);
+      const result = identifyDocument(text, ocrConfidence);
+      row.fields = result.fields;
+      row.usedOCR = usedOCR;
+      row.rotationUsed = rotationUsed;
+      row.ocrText = text;
+      row.ocrConfidencePct = ocrConfidence != null ? Math.round(ocrConfidence * 100) : null;
+
+      if (result.nome && result.confidence >= CONFIDENCE_THRESHOLD){
+        row.suggestedName = uniqueName(result.nome) + '.pdf';
+        row.confidence = result.confidence;
+        row.status = 'ok';
+      } else if (result.nome){
+        row.suggestedName = uniqueName(result.nome) + '.pdf';
+        row.confidence = result.confidence;
+        row.status = 'low';
+      } else {
+        row.suggestedName = uniqueName(file.name.replace(/\.pdf$/i,'')) + '.pdf';
+        row.confidence = 0;
+        row.status = 'unidentified';
+      }
+    } catch (err){
+      console.error(err);
+      row.status = 'error';
+      row.error = err.message || String(err);
+      row.suggestedName = uniqueName(file.name.replace(/\.pdf$/i,'')) + '.pdf';
+    }
+
+    done++;
+    updateProgress(done, total);
+    renderRow(row);
+  }
+
+  progressLabel.textContent = `Concluído: ${total} documento(s) processado(s).`;
+  updateCount();
+}
+
+function updateProgress(done, total){
+  const pct = total ? Math.round((done/total)*100) : 0;
+  progressLabel.textContent = `Processando ${done} de ${total} documentos...`;
+  progressFill.style.width = pct + '%';
+}
+
+function fieldsSummary(f){
+  if (!f) return '';
+  const parts = [];
+  if (f.tipo) parts.push(`<b>Tipo:</b> ${f.tipo}`);
+  if (f.condominio) parts.push(`<b>Condomínio:</b> ${f.condominio}`);
+  if (f.dataDDMM) parts.push(`<b>Data:</b> ${f.dataDDMM}${f.ano ? '.'+f.ano : ''}`);
+  else if (f.mes || f.ano) parts.push(`<b>Mês/Ano:</b> ${f.mes||'?'} ${f.ano||''}`);
+  else if (f.mesCompleto || f.ano) parts.push(`<b>Mês/Ano:</b> ${f.mesCompleto||'?'} ${f.ano||''}`);
+  if (f.unidade) parts.push(`<b>Unidade:</b> ${f.unidade}`);
+  if (f.ucSuffix) parts.push(`<b>UC:</b> ...${f.ucSuffix}`);
+  if (f.apartamento) parts.push(`<b>Apto:</b> ${f.apartamento}`);
+  if (f.numeroProtocolo) parts.push(`<b>Nº Protocolo:</b> ${f.numeroProtocolo}`);
+  return parts.join('<br>') || '<span style="opacity:.5">nenhum campo reconhecido</span>';
+}
+
+// Mostra o texto bruto reconhecido (nativo ou OCR) para o usuário conferir por que a identificação falhou/ficou incerta.
+function ocrTextDetails(row){
+  if (!row.ocrText || !row.ocrText.trim()) return '';
+  const preview = row.ocrText.trim().slice(0, 600);
+  return `<details class="ocrDetails"><summary>ver texto reconhecido</summary><pre>${escapeHtml(preview)}</pre></details>`;
+}
+
+// Botão "ver arquivo": abre o PDF original numa aba nova pra conferência visual antes de renomear.
+// Só cria a URL do blob na hora do clique (não guarda uma por linha o tempo todo).
+function verArquivoBtn(row){
+  if (!row.originalFile) return '';
+  return `<button type="button" class="linkBtn verArquivoBtn" data-id="${row.id}">📄 ver arquivo</button>`;
+}
+
+// Botão "ensinar condomínio": só aparece em linhas de baixa confiança/não identificadas. Deixa o usuário
+// confirmar manualmente qual é o condomínio; a partir daí o nome fica salvo (localStorage, só nesta
+// máquina) e passa a ser reconhecido automaticamente nos próximos documentos — inclusive em lotes futuros.
+function ensinarBtn(row){
+  return `<button type="button" class="linkBtn ensinarBtn" data-id="${row.id}">🎓 ensinar condomínio</button>`;
+}
+
+function renderRow(row){
+  let tr = document.getElementById('row-' + row.id);
+  if (!tr){
+    tr = document.createElement('tr');
+    tr.id = 'row-' + row.id;
+    resultsBody.appendChild(tr);
+  }
+
+  let badge, nameCell;
+  if (row.status === 'processing'){
+    badge = `<span class="status"><span class="spinner"></span> lendo...</span>`;
+    nameCell = `<span class="orig">processando...</span>`;
+  } else if (row.status === 'error'){
+    badge = `<span class="badge err">✕ ERRO</span>`;
+    nameCell = `<div class="status">${escapeHtml(row.error||'falha ao processar')}</div>
+      <input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
+      <div class="rowActions">${verArquivoBtn(row)}</div>`;
+  } else if (row.status === 'unidentified'){
+    badge = `<span class="badge low">⚠ NÃO IDENTIFICADO</span>`;
+    nameCell = `<div class="status">Não foi possível determinar tipo/data automaticamente.</div>
+      <input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
+      <div class="rowActions">${verArquivoBtn(row)}${ensinarBtn(row)}</div>
+      ${ocrTextDetails(row)}`;
+  } else if (row.status === 'low'){
+    badge = `<span class="badge low">⚠ CONFERIR (${Math.round(row.confidence*100)}%)</span>`;
+    nameCell = `<input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
+      <div class="rowActions">${verArquivoBtn(row)}${ensinarBtn(row)}</div>
+      ${ocrTextDetails(row)}`;
+  } else {
+    badge = row.manualEdit
+      ? `<span class="badge high">✓ CONFIRMADO MANUALMENTE (100%)</span>`
+      : `<span class="badge high">✓ ALTA CONFIANÇA (${Math.round(row.confidence*100)}%)</span>`;
+    nameCell = `<div class="name">${escapeHtml(row.suggestedName)}</div>
+      <div class="rowActions">${verArquivoBtn(row)}</div>`;
+  }
+
+  tr.innerHTML = `
+    <td><div class="orig">${escapeHtml(row.originalName)}</div>${row.usedOCR ? `<div class="status">via OCR${row.rotationUsed ? ' · girado '+row.rotationUsed+'°' : ''}${row.ocrConfidencePct != null ? ' · conf. '+row.ocrConfidencePct+'%' : ''}${row.reviewed ? ' · revisado' : ''}</div>` : ''}</td>
+    <td>${nameCell}</td>
+    <td>${badge}</td>
+    <td><div class="fields">${fieldsSummary(row.fields)}</div></td>
+  `;
+
+  const verBtn = tr.querySelector('.verArquivoBtn');
+  if (verBtn){
+    verBtn.addEventListener('click', () => {
+      const url = URL.createObjectURL(row.originalFile);
+      window.open(url, '_blank');
+    });
+  }
+
+  const ensinarBtnEl = tr.querySelector('.ensinarBtn');
+  if (ensinarBtnEl){
+    ensinarBtnEl.addEventListener('click', () => ensinarCondominio(row));
+  }
+
+  const input = tr.querySelector('.nameInput');
+  if (input){
+    // Se o usuário digitou o nome à mão (em vez de aceitar a sugestão), considera confirmado: 100% de
+    // confiança, badge de alta confiança e sai da fila do botão "revisar baixa confiança".
+    input.addEventListener('change', () => {
+      const r = items.find(i => i.id === row.id);
+      let val = input.value.trim();
+      if (!val.toLowerCase().endsWith('.pdf')) val += '.pdf';
+      if (r.suggestedName) usedNames.delete(r.suggestedName.toUpperCase());
+      usedNames.add(val.toUpperCase());
+      r.suggestedName = val;
+      r.confidence = 1;
+      r.status = 'ok';
+      r.manualEdit = true;
+      renderRow(r);
+    });
+  }
+  updateCount();
+}
+
+// Reaplica identifyDocument numa linha já processada (usado depois de "ensinar condomínio"), preservando
+// o texto/confiança de OCR já extraídos — só a etapa de reconhecimento de campos é refeita.
+function reprocessarLinha(row){
+  if (!row.ocrText) return false;
+  const ocrConfidence = row.ocrConfidencePct != null ? row.ocrConfidencePct / 100 : null;
+  const result = identifyDocument(row.ocrText, ocrConfidence);
+  if (!result.nome) return false;
+
+  if (row.suggestedName) usedNames.delete(row.suggestedName.toUpperCase());
+  row.fields = result.fields;
+  row.suggestedName = uniqueName(result.nome) + '.pdf';
+  row.confidence = result.confidence;
+  row.status = result.confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
+  return true;
+}
+
+// Fluxo de "ensinar condomínio": pede confirmação do nome (sugerindo o que o fallback de cabeçalho
+// encontrou, se encontrou algo), salva no whitelist aprendido e tenta reidentificar esta linha e
+// qualquer outra do lote atual que ainda esteja pendente — é comum vários documentos do mesmo condomínio
+// aparecerem juntos no mesmo lote de digitalização.
+function ensinarCondominio(row){
+  const raw = row.ocrText || '';
+  const sugestao = findCondominioFallback(raw) || '';
+  const nome = window.prompt(
+    'Nome do condomínio como deve aparecer no nome do arquivo (ex.: ARQUIPELAGO DO SOL):',
+    sugestao
+  );
+  if (nome === null) return; // cancelou
+  const nomeLimpo = nome.trim();
+  if (!nomeLimpo) return;
+
+  aprenderCondominio(nomeLimpo, sugestao);
+  updateLearnCount();
+
+  let melhoradas = 0;
+  for (const r of items){
+    if (r.status !== 'low' && r.status !== 'unidentified') continue;
+    if (reprocessarLinha(r)){
+      melhoradas++;
+      renderRow(r);
+    }
+  }
+
+  alert(`"${nomeLimpo.toUpperCase()}" salvo. Documentos futuros com esse nome no cabeçalho serão reconhecidos automaticamente (inclusive em lotes futuros neste computador).${melhoradas ? `\n\n${melhoradas} documento(s) deste lote foram reidentificados agora.` : ''}`);
+}
+
+function reviewableRows(){
+  // Só documentos que passaram por OCR, ficaram abaixo do limiar de confiança e ainda não foram revisados
+  // (a revisão é determinística — rodar de novo no mesmo arquivo dá o mesmo resultado, então não repete sozinha).
+  return items.filter(i => i.status !== 'processing' && i.usedOCR && !i.reviewed && (i.status === 'low' || i.status === 'unidentified'));
+}
+
+function updateCount(){
+  const doneCount = items.filter(i => i.status !== 'processing').length;
+  countEl.textContent = `${doneCount} de ${items.length} documento(s) prontos`;
+  downloadBtn.disabled = doneCount === 0;
+
+  const pending = reviewableRows();
+  if (pending.length > 0){
+    reviewBtn.style.display = 'inline-block';
+    reviewBtn.textContent = `REVISAR BAIXA CONFIANÇA (${pending.length})`;
+  } else {
+    reviewBtn.style.display = 'none';
+  }
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function escapeAttr(s){ return escapeHtml(s); }
+
+// Revisão manual, sob demanda, só dos documentos que ficaram abaixo de 70% de confiança (ou não identificados)
+// e vieram de OCR. É mais lenta de propósito (testa mais combinações) — por isso fica fora do fluxo automático.
+reviewBtn.addEventListener('click', async () => {
+  const pending = reviewableRows();
+  if (!pending.length) return;
+
+  reviewBtn.disabled = true;
+  clearBtn.disabled = true;
+  downloadBtn.disabled = true;
+  progressWrap.style.display = 'block';
+
+  let done = 0;
+  const total = pending.length;
+  progressLabel.textContent = `Revisando ${done} de ${total} documento(s) de baixa confiança...`;
+  progressFill.style.width = '0%';
+
+  for (const row of pending){
+    row.status = 'processing';
+    renderRow(row);
+    try {
+      const improved = await reviewDocument(row);
+      if (improved && improved.result.nome){
+        // libera o nome antigo (se ele tinha reservado um) antes de reservar o novo
+        if (row.suggestedName) usedNames.delete(row.suggestedName.toUpperCase());
+        row.ocrText = improved.text;
+        row.ocrConfidencePct = Math.round(improved.ocrConfidence * 100);
+        row.rotationUsed = improved.rotationUsed;
+        row.fields = improved.result.fields;
+        row.suggestedName = uniqueName(improved.result.nome) + '.pdf';
+        row.confidence = improved.result.confidence;
+        row.status = improved.result.confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
+        row.reviewed = true;
+      } else if (improved){
+        // revisão rodou mas não conseguiu identificar nada melhor — mantém o nome anterior editável
+        row.ocrText = improved.text;
+        row.ocrConfidencePct = Math.round(improved.ocrConfidence * 100);
+        row.rotationUsed = improved.rotationUsed;
+        row.reviewed = true;
+        row.status = row.suggestedName ? 'low' : 'unidentified';
+      } else {
+        // texto nativo (não veio de OCR) — nada a revisar
+        row.reviewed = true;
+        row.status = row.suggestedName ? 'low' : 'unidentified';
+      }
+    } catch (err){
+      console.error(err);
+      row.reviewed = true;
+      row.status = row.suggestedName ? 'low' : 'unidentified';
+    }
+    done++;
+    progressLabel.textContent = `Revisando ${done} de ${total} documento(s) de baixa confiança...`;
+    progressFill.style.width = Math.round((done/total)*100) + '%';
+    renderRow(row);
+  }
+
+  progressLabel.textContent = `Revisão concluída: ${total} documento(s) reprocessado(s).`;
+  reviewBtn.disabled = false;
+  clearBtn.disabled = false;
+  downloadBtn.disabled = false;
+  updateCount();
+});
+
+downloadBtn.addEventListener('click', async () => {
+  downloadBtn.disabled = true;
+  downloadBtn.textContent = 'GERANDO ZIP...';
+  const zip = new JSZip();
+  for (const row of items){
+    if (row.status === 'processing') continue;
+    zip.file(row.suggestedName, row.originalFile);
+  }
+  const blob = await zip.generateAsync({ type: 'blob' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'documentos_renomeados.zip';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  downloadBtn.disabled = false;
+  downloadBtn.textContent = 'BAIXAR TODOS (.ZIP)';
+});
+
+// Fecha o lote atual: limpa a lista pra você começar um lote novo sem misturar com o que já foi baixado.
+// Útil quando você digitaliza em levas grandes (ex.: 150 documentos) mas prefere processar/conferir em
+// partes — depois de baixar o ZIP de uma parte, clique aqui antes de arrastar a próxima leva.
+clearBtn.addEventListener('click', () => {
+  if (items.length && !confirm('Limpar a lista atual? Isso não apaga o ZIP já baixado, só reseta a tela para um novo lote.')) return;
+  items = [];
+  usedNames = new Set();
+  resultsBody.innerHTML = '';
+  resultsTable.style.display = 'none';
+  actionsBar.style.display = 'none';
+  progressWrap.style.display = 'none';
+  empty.style.display = 'block';
+});
+
+/* ============================================================
+   EXPORTAR/IMPORTAR APRENDIZADO DE CONDOMÍNIOS
+   ============================================================
+   O aprendizado (botão "🎓 ensinar condomínio") fica salvo no localStorage, que é isolado por origem —
+   ou seja, rodando o app localmente (file://) e depois hospedado (ex.: GitHub Pages, https://...) são
+   dois "bancos" separados na visão do navegador. Esses dois botões deixam levar a lista aprendida de um
+   ambiente pro outro (ou pra outro computador/navegador) via um arquivo .json.
+   ============================================================ */
+
+function updateLearnCount(){
+  const n = learnedCondominios.length;
+  learnCount.textContent = n === 0
+    ? 'Nenhum condomínio aprendido manualmente ainda.'
+    : `${n} condomínio(s) aprendido(s) manualmente (salvos neste navegador).`;
+}
+
+exportLearnBtn.addEventListener('click', () => {
+  if (!learnedCondominios.length){
+    alert('Ainda não há nenhum condomínio aprendido pra exportar. Use o botão "🎓 ensinar condomínio" nas linhas de baixa confiança primeiro.');
+    return;
+  }
+  const blob = new Blob([JSON.stringify(learnedCondominios, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'renomeador-aprendizado-condominios.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+
+importLearnBtn.addEventListener('click', () => importLearnInput.click());
+
+importLearnInput.addEventListener('change', async () => {
+  const file = importLearnInput.files[0];
+  importLearnInput.value = '';
+  if (!file) return;
+
+  let parsed;
+  try {
+    const text = await file.text();
+    parsed = JSON.parse(text);
+  } catch(e){
+    alert('Não consegui ler esse arquivo como JSON válido. Ele precisa ser um arquivo exportado por este mesmo app.');
+    return;
+  }
+  if (!Array.isArray(parsed)){
+    alert('Formato inesperado: o arquivo deveria conter uma lista de condomínios.');
+    return;
+  }
+
+  // Mescla com o que já existe (não substitui): mesmo nome de condomínio soma aliases em vez de duplicar.
+  let novos = 0, aliasesSomados = 0;
+  for (const entry of parsed){
+    if (!entry || typeof entry.nome !== 'string') continue;
+    const nome = entry.nome.trim().toUpperCase();
+    if (!nome) continue;
+    let existente = learnedCondominios.find(c => c.nome === nome);
+    if (!existente){
+      existente = { nome, aliases: [] };
+      learnedCondominios.push(existente);
+      novos++;
+    }
+    const aliases = Array.isArray(entry.aliases) ? entry.aliases : [];
+    for (const alias of aliases){
+      const a = String(alias).trim().toUpperCase();
+      if (a && !existente.aliases.includes(a)){
+        existente.aliases.push(a);
+        aliasesSomados++;
+      }
+    }
+  }
+  saveLearnedCondominios();
+  updateLearnCount();
+
+  // Se já houver documentos pendentes na tela, tenta reidentificar com o aprendizado recém-importado.
+  let melhoradas = 0;
+  for (const r of items){
+    if (r.status !== 'low' && r.status !== 'unidentified') continue;
+    if (reprocessarLinha(r)){ melhoradas++; renderRow(r); }
+  }
+
+  alert(`Importado: ${novos} condomínio(s) novo(s), ${aliasesSomados} apelido(s) somado(s) aos existentes.${melhoradas ? `\n${melhoradas} documento(s) pendente(s) nesta tela foram reidentificados agora.` : ''}`);
+});
+
+updateLearnCount();
+</script>
+</body>
+</html>
