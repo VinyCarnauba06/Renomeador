@@ -69,6 +69,3 @@ Cada novo tipo de documento segue o mesmo contrato: um `test()` que reconhece o 
 - Tipos de documento totalmente novos (fora dos já cobertos por `DOCUMENT_TYPES`) não são reconhecidos automaticamente; é preciso adicionar uma regra nova no código.
 - O aprendizado de condomínios fica salvo por navegador/origem — trocar de navegador, computador ou domínio de acesso (por exemplo, rodar localmente e depois via GitHub Pages) exige exportar e importar a lista aprendida manualmente.
 
-## Licença
-
-Projeto de uso interno. Ajuste esta seção conforme a licença que você quiser adotar (por exemplo, MIT, caso deseje disponibilizar o código abertamente para outras pessoas usarem e contribuírem).
