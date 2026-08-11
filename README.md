@@ -22,8 +22,12 @@ Todo o processamento acontece **no navegador do usuário**. Nenhum arquivo, imag
 - **Visualização do arquivo original** — abre o PDF numa aba nova para conferência visual antes de confirmar o nome.
 - **Aprendizado por correção manual** — ao confirmar manualmente o nome de um condomínio, a aplicação memoriza essa informação (salva localmente, no navegador) e passa a reconhecer esse condomínio automaticamente nos próximos documentos e lotes.
 - **Exportar/importar aprendizado** — a lista de condomínios aprendidos pode ser exportada em `.json` e importada em outro navegador ou computador, permitindo levar o conhecimento acumulado entre ambientes.
+- **Confirmação com um clique** — quando o OCR acerta o nome mas a confiança fica abaixo do limiar (ex.: por causa da qualidade da digitalização), um botão "✓ confirmar" marca a sugestão como certa sem precisar reescrever o texto.
+- **Lista sempre organizada** — ao final do processamento (ou de uma revisão/confirmação), os documentos que ainda precisam de atenção sobem para o topo da lista e os que já estão prontos descem para o fim.
 - **Processamento em lote com download em `.zip`** — todos os arquivos renomeados são baixados de uma vez, já compactados.
 - **Separação por lotes** — botão para encerrar o lote atual e começar um novo, sem misturar arquivos já baixados com os próximos.
+- **Dica de condomínio único do lote** — quando toda a digitalização é de um só condomínio, selecionar isso antecipadamente preenche o campo nos documentos em que o OCR não conseguiu identificar pelo conteúdo (nunca sobrescreve o que já foi lido corretamente).
+- **Processamento em blocos de 30** — lotes grandes (ex.: 150–200 arquivos) são processados automaticamente em blocos de 30, com um respiro para o navegador entre cada bloco, em vez de uma fila só contínua.
 
 ## Como funciona (privacidade)
 
@@ -41,15 +45,25 @@ Não há backend, banco de dados ou API própria. A única comunicação de rede
 
 1. Acesse a aplicação (link acima) ou abra o arquivo `index.html` localmente, sem necessidade de servidor.
 2. Arraste os PDFs digitalizados para a área indicada (ou clique para selecionar).
-3. Aguarde o processamento — cada documento recebe um nome sugerido e um selo de confiança.
-4. Documentos com selo **⚠ CONFERIR** ou **⚠ NÃO IDENTIFICADO**: confira o arquivo original (botão "ver arquivo"), ajuste o nome manualmente se necessário, ou use "🎓 ensinar condomínio" quando o problema for só o nome do condomínio não reconhecido.
-5. Opcional: clique em "REVISAR BAIXA CONFIANÇA" para reprocessar os casos incertos com um método de OCR mais lento e completo.
-6. Clique em "BAIXAR TODOS (.ZIP)" para exportar o lote inteiro já renomeado.
-7. Clique em "LIMPAR LISTA / NOVO LOTE" antes de processar o próximo grupo de arquivos.
+3. Aguarde o processamento — cada documento recebe um nome sugerido e um selo de confiança. Ao final, os documentos que precisam de atenção ficam no topo da lista.
+4. Documentos com selo **⚠ CONFERIR**: se o nome sugerido já estiver certo, clique em "✓ confirmar". Se não, ajuste o campo manualmente (isso também confirma).
+5. Documentos com selo **⚠ NÃO IDENTIFICADO**: confira o arquivo original (botão "ver arquivo"), digite o nome manualmente, ou use "🎓 ensinar condomínio" quando o problema for só o nome do condomínio não reconhecido.
+6. Opcional: clique em "REVISAR BAIXA CONFIANÇA" para reprocessar os casos incertos com um método de OCR mais lento e completo.
+7. Clique em "BAIXAR TODOS (.ZIP)" para exportar o lote inteiro já renomeado.
+8. Clique em "LIMPAR LISTA / NOVO LOTE" antes de processar o próximo grupo de arquivos.
+
+## Estrutura do projeto
+
+```
+index.html   estrutura da página (sem lógica)
+style.css    estilos
+script.js    toda a lógica: leitura de PDF, OCR, regras de nomenclatura e interface
+README.md    este arquivo
+```
 
 ## Adicionando novos tipos de documento ou condomínios
 
-As regras de nomenclatura ficam concentradas no início do arquivo `index.html`, nas constantes:
+As regras de nomenclatura ficam concentradas no início do arquivo `script.js`, nas constantes:
 
 - `CONDOMINIOS` — lista de condomínios conhecidos e seus apelidos/variações de OCR.
 - `DOCUMENT_TYPES` — lista ordenada de detectores (tipo de documento, teste de reconhecimento, extração de campos e formato do nome final).

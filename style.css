@@ -1,0 +1,52 @@
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --border:#2a2f3a;
+    --text:#e8eaed; --muted:#9aa0ab; --accent:#4f8cff; --ok:#2ecc71; --warn:#f5a623; --err:#e74c3c;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--text);}
+  .wrap{max-width:1000px;margin:0 auto;padding:32px 20px 80px;}
+  h1{font-size:22px;text-align:center;margin:0 0 4px;}
+  .sub{text-align:center;color:var(--muted);font-size:13px;margin-bottom:28px;}
+  .loteHint{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;font-size:12px;color:var(--muted);}
+  .loteHint select{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px;}
+  #drop{
+    border:2px dashed var(--border);border-radius:14px;padding:48px 20px;text-align:center;
+    background:var(--panel);cursor:pointer;transition:.15s;
+  }
+  #drop.drag{border-color:var(--accent);background:#182036;}
+  #drop .big{font-size:16px;margin-bottom:6px;}
+  #drop .small{color:var(--muted);font-size:12px;}
+  input[type=file]{display:none;}
+  #progressWrap{margin-top:18px;display:none;}
+  #progressLabel{font-size:12px;color:var(--muted);margin-bottom:6px;}
+  #progressBar{height:8px;background:var(--panel2);border-radius:6px;overflow:hidden;border:1px solid var(--border);}
+  #progressFill{height:100%;width:0%;background:var(--accent);transition:width .2s;}
+  table{width:100%;border-collapse:collapse;margin-top:24px;font-size:13px;}
+  th{text-align:left;color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em;padding:8px 10px;border-bottom:1px solid var(--border);}
+  td{padding:10px;border-bottom:1px solid var(--border);vertical-align:top;}
+  tr:hover td{background:var(--panel2);}
+  .orig{color:var(--muted);font-family:ui-monospace,Consolas,monospace;font-size:12px;word-break:break-all;}
+  .name{font-family:ui-monospace,Consolas,monospace;font-size:13px;}
+  .nameInput{width:100%;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-family:ui-monospace,Consolas,monospace;font-size:12px;}
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap;}
+  .badge.high{background:rgba(46,204,113,.15);color:var(--ok);}
+  .badge.low{background:rgba(245,166,35,.15);color:var(--warn);}
+  .badge.err{background:rgba(231,76,60,.15);color:var(--err);}
+  .fields{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.5;}
+  .fields b{color:#c7cad1;}
+  .status{font-size:11px;color:var(--muted);}
+  .actions{margin-top:24px;display:flex;justify-content:space-between;align-items:center;}
+  #count{color:var(--muted);font-size:13px;}
+  button{background:var(--accent);color:#fff;border:none;padding:11px 22px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;}
+  button:disabled{opacity:.4;cursor:not-allowed;}
+  button.secondary{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:6px 12px;font-size:12px;font-weight:500;}
+  .spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  #empty{text-align:center;color:var(--muted);font-size:12px;margin-top:40px;}
+  .linkBtn{background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;padding:0;cursor:pointer;margin-right:10px;text-decoration:underline;}
+  .linkBtn:hover{opacity:.8;}
+  .rowActions{margin-top:6px;}
+  .ocrDetails{margin-top:6px;}
+  .ocrDetails summary{cursor:pointer;color:var(--accent);font-size:11px;}
+  .ocrDetails pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:6px;font-size:11px;color:var(--muted);max-height:200px;overflow:auto;}
+  .rulehint{text-align:center;color:var(--muted);font-size:11px;margin-top:10px;}
