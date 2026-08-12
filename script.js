@@ -374,6 +374,47 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
   },
   {
+    // Comprovante de pagamento por débito automático (Internet Banking Sicredi) — cobrança recorrente
+    // debitada direto da conta do condomínio (ex.: seguradora, concessionária). Achado 13/ago num
+    // comprovante da Tokio Marine Seguradora. Usa a "Data de pagamento" (preferível à "Data de vencimento",
+    // que pode ser alguns dias antes se o débito atrasar).
+    id: "comprovante_debito_automatico_sicredi",
+    test: (norm) => (norm.includes('DEBITO AUTOMATICO') || semEspacos(norm).includes('DEBITOAUTOMATICO')) && norm.includes('ASSOCIADO'),
+    extract: (norm, raw) => {
+      const associado = raw.match(/ASSOCIADO\s*:?\s*([^\n]+)/i);
+      let condominio = associado ? (findCondominio(normalize(associado[1])) || findCondominioFallback(associado[1])) : null;
+      if (!condominio) condominio = resolverCondominio(norm, raw);
+      let m = raw.match(/DATA\s+DE\s+PAGAMENTO[\s\S]{0,10}?(\d{2}\D\d{2}\D\d{4})/i);
+      if (!m) m = raw.match(/DATA\s+DE\s+VENCIMENTO[\s\S]{0,10}?(\d{2}\D\d{2}\D\d{4})/i);
+      const dataDDMM = m ? findData(m[1]).dataDDMM : null;
+      return { condominio, dataDDMM };
+    },
+    format: f => `COMPROVANTE DEBITO AUTOMATICO${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
+  },
+  {
+    // Certidão de Regularidade do FGTS (CRF) — Caixa Econômica Federal. Usa a data inicial do período de
+    // validade como referência (a "Informação obtida em" é só o timestamp da consulta, não do documento).
+    id: "certidao_fgts",
+    test: (norm) => norm.includes('CERTIFICADO DE REGULARIDADE') && norm.includes('FGTS'),
+    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
+    format: f => `CERTIDAO FGTS${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
+  },
+  {
+    // Certidão Negativa de Débitos Trabalhistas (CNDT) — Justiça do Trabalho. Usa a data de expedição.
+    id: "certidao_cndt",
+    test: (norm) => norm.includes('DEBITOS TRABALHISTAS'),
+    extract: (norm, raw) => {
+      const condominio = resolverCondominio(norm, raw);
+      let m = raw.match(/EXPEDI[CÇ][AÃ]O[\s\S]{0,10}?(\d{2}\D\d{2}\D\d{4})/i);
+      const dataDDMM = m ? findData(m[1]).dataDDMM : findData(raw).dataDDMM;
+      return { condominio, dataDDMM };
+    },
+    format: f => `CERTIDAO TRABALHISTA${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
+  },
+  {
     // Recibo de cartório — usa a data por extenso do rodapé ("Maceió - AL, ..., DD de MÊS de AAAA").
     id: "recibo_cartorio",
     test: (norm) => /CART[OÓ]RIO/.test(norm) && /RECIBO/.test(norm),
@@ -524,9 +565,14 @@ const DOCUMENT_TYPES = [
     // Segundo sinal (13/ago): boletos gerados por plataforma de cobrança (Pix + QR code, sem "ficha de
     // compensação" tradicional) não têm essa frase, mas sempre imprimem os 3 campos juntos — Beneficiário,
     // Pagador e Vencimento — o que já é uma assinatura confiável de boleto bancário nesse layout também.
+    // Terceiro sinal (13/ago): ficha "Recibo do/de Pagador" do Banco do Brasil — mesmo layout do
+    // boleto_rateio_unidade só que sem coluna de "Unidade" (não é rateio por lote). Achado com OCR bem ruim,
+    // onde BENEFICIÁRIO/PAGADOR/VENCIMENTO saíram todos garbled ("Bulmnlw'lliº", "Fºam", "Vena/manto") mas o
+    // título "Reclbo do Pagador"/"Recibo de Pagador" sobrevive (só a vogal do meio de "Recibo" varia: i↔l).
     id: "boleto_bancario_generico",
     test: (norm) => /PAG[AÁ]VEL\s+PREFERENCIALMENTE/.test(norm) || semEspacos(norm).includes('PAGAVELPREFERENCIALMENTE')
-      || (norm.includes('BENEFICIARIO') && norm.includes('PAGADOR') && norm.includes('VENCIMENTO')),
+      || (norm.includes('BENEFICIARIO') && norm.includes('PAGADOR') && norm.includes('VENCIMENTO'))
+      || /REC[IL]BO\s+D[OE]\s+PAGADOR/.test(norm),
     extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
     format: f => `BOLETO${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
     confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
