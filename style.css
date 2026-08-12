@@ -54,3 +54,16 @@
   .condoChipsLabel{color:var(--muted);font-size:11px;margin-right:2px;}
   .condoChip{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:20px;padding:3px 10px;font-size:11px;font-weight:500;cursor:pointer;}
   .condoChip:hover{border-color:var(--accent);color:var(--accent);}
+  .mergeCheckbox{width:16px;height:16px;cursor:pointer;}
+  .mergePanel{flex-direction:column;align-items:stretch;background:var(--panel);border:1px solid var(--accent);border-radius:10px;padding:16px;margin-top:16px;}
+  .mergePanelTitle{font-size:13px;font-weight:600;margin-bottom:10px;}
+  .mergeQueueList{list-style:decimal;margin:0 0 12px;padding-left:20px;}
+  .mergeQueueList li{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px;font-family:ui-monospace,Consolas,monospace;}
+  .mergeQueueName{word-break:break-all;}
+  .mergeQueueActions{display:flex;gap:8px;white-space:nowrap;}
+  .mergeQueueActions .linkBtn{margin-right:0;}
+  .mergeQueueActions .linkBtn:disabled{opacity:.3;cursor:not-allowed;text-decoration:none;}
+  .mergePanelRow{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}
+  .mergePanelLabel{font-size:12px;color:var(--muted);}
+  .mergeNameInput{flex:1;min-width:220px;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 10px;font-family:ui-monospace,Consolas,monospace;font-size:12px;}
+  .mergePanelActions{display:flex;justify-content:flex-end;gap:10px;}

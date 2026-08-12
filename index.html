@@ -6,6 +6,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -36,14 +37,33 @@
   <table id="resultsTable" style="display:none">
     <thead>
       <tr>
-        <th style="width:22%">Arquivo original</th>
-        <th style="width:38%">Nome identificado</th>
+        <th style="width:4%"></th>
+        <th style="width:20%">Arquivo original</th>
+        <th style="width:36%">Nome identificado</th>
         <th style="width:12%">Confiança</th>
         <th style="width:28%">Campos encontrados</th>
       </tr>
     </thead>
     <tbody id="resultsBody"></tbody>
   </table>
+
+  <!-- Fila de junção: aparece quando 2+ documentos são marcados na coluna de checkbox. Pensado pro caso do
+       síndico pedir digitalizações num único PDF (ex.: boleto + comprovante) — o usuário marca os arquivos
+       envolvidos, ajusta a ordem das páginas no PDF final e confirma. -->
+  <div class="actions mergePanel" id="mergePanel" style="display:none">
+    <div class="mergePanelInner">
+      <div class="mergePanelTitle">🔗 Juntar em 1 PDF — ordem das páginas no arquivo final:</div>
+      <ol id="mergeQueueList" class="mergeQueueList"></ol>
+      <div class="mergePanelRow">
+        <label for="mergeNameInput" class="mergePanelLabel">Nome do arquivo final:</label>
+        <input type="text" id="mergeNameInput" class="mergeNameInput">
+      </div>
+      <div class="mergePanelActions">
+        <button id="mergeCancelBtn" class="secondary" type="button">CANCELAR SELEÇÃO</button>
+        <button id="mergeConfirmBtn" type="button">JUNTAR EM 1 PDF</button>
+      </div>
+    </div>
+  </div>
 
   <div class="actions" id="actionsBar" style="display:none">
     <div id="count"></div>
