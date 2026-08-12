@@ -230,12 +230,14 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
   },
   {
-    // Comprovante de pagamento de boleto (sistema Sicredi de pagamentos) — usa a data do pagamento,
+    // Comprovante de pagamento de boleto (Sicredi/Caixa/Banco Cooperativo) — usa a data do pagamento,
     // extraída preferencialmente do campo PAGADOR (não do BENEFICIÁRIO, que é outra empresa/fornecedor).
     // Não exige "SICREDI" no texto — é logotipo estilizado e o OCR quase nunca lê. A frase "Pagamento de
-    // Boletos" já é específica o bastante sozinha.
+    // Boleto(s)" já é específica o bastante sozinha. Singular incluído (12/ago): um comprovante Caixa Econômica
+    // real saiu do OCR como "PAGAMENTO DE BOLETO BANCOS" — o "S" de "BOLETOS" tinha virado espaço antes de
+    // "BANCOS", quebrando o teste que só aceitava o plural.
     id: "comprovante_boleto_sicredi",
-    test: (norm) => /PAGAMENTO\s+DE\s+BOLETOS/.test(norm) || semEspacos(norm).includes('PAGAMENTODEBOLETOS'),
+    test: (norm) => /PAGAMENTO\s+DE\s+BOLETOS?\b/.test(norm) || semEspacos(norm).includes('PAGAMENTODEBOLETO'),
     extract: (norm, raw) => {
       // Nomes de condomínio às vezes quebram em 2 linhas no OCR (ex.: "MAISON SAINT\nTROPEZ") — captura
       // uma janela maior e deixa o normalize() (que colapsa quebras de linha) juntar de volta.
@@ -391,6 +393,18 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
   },
   {
+    // Nota de cobrança/débito formal de prestador de serviço com contrato (manutenção de elevador,
+    // NFS-e de prefeitura etc.) — identificada pelo rótulo padrão "Tomador de Serviço(s)" que empresas
+    // prestadoras e sistemas de nota fiscal eletrônica usam pra identificar o cliente (aqui, o condomínio).
+    // Achado 12/ago numa nota da OTIS Elevadores ("Tomador de Serviços: COND ED REVENANT NERI") — o mesmo
+    // rótulo também aparece nas NFS-e da Prefeitura de Marechal Deodoro do mesmo lote, então cobre as duas.
+    id: "nota_cobranca_tomador_servico",
+    test: (norm) => /TOMADOR\s+DE\s+SERVI[CÇ]OS?/.test(norm),
+    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
+    format: f => `NOTA COBRANCA${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
+  },
+  {
     // Genérico: PROTOCOLO/TERMO + condomínio + data completa
     id: "generico_tipo_condominio_data",
     test: (norm) => !!findTipoGenerico(norm),
@@ -519,6 +533,11 @@ function findCondominioFallback(rawText){
   if (m) return m[1].trim().toUpperCase();
   m = rawText.match(/\bEDIF\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
   if (m) return m[1].trim().toUpperCase();
+  // "COND ED X" — abreviação de 2 letras só, sem ponto (achado 12/ago numa nota de cobrança OTIS: "Tomador
+  // de Serviços: COND ED REVENANT NERI"). Mais permissivo que os padrões "EDIF"/"EDIFÍCIO" acima, por isso
+  // entra depois deles na ordem de tentativa.
+  m = rawText.match(/\bCOND\.?\s+ED\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
+  if (m) return m[1].trim().toUpperCase();
   // Rótulo "Associado:" — comum em extratos/comprovantes de cooperativa de crédito (Sicredi/Sicoob),
   // independente do tipo específico de documento (extrato, comprovante PIX, débito automático etc.).
   // Achado no lote de 91 (12/ago): vários documentos Sicredi vinham com condomínio 100% legível aqui mas
@@ -532,56 +551,6 @@ function findCondominioFallback(rawText){
   m = rawText.match(/CONDOM[IÍ]NIO\s+(?:DO\s+)?(?:RESIDENCIAL\s+)?([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
   if (m) return m[1].trim().toUpperCase();
   return null;
-}
-
-// Similaridade por bigramas entre o nome de um condomínio e o texto do OCR inteiro, medida como RECALL
-// (quantos bigramas do nome aparecem em algum lugar do texto ÷ total de bigramas do nome) — não Dice
-// simétrico. Dice pleno penaliza pelo tamanho do texto inteiro (documento longo dilui o score mesmo com o
-// nome presente e correto); recall isola só "o quanto da assinatura do nome apareceu", o que é robusto a
-// OCR reordenando/quebrando trechos (linha do meio de tabela, quebra de coluna) sem exigir alinhamento
-// contíguo. Custo O(tamanho do texto), rápido o bastante pra rodar contra 145+ condomínios só nas linhas
-// que precisam de revisão (não no fluxo automático).
-function bigramas(str){
-  const s = str.replace(/\s+/g, '');
-  const out = [];
-  for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2));
-  return out;
-}
-
-function bigramRecall(nome, texto){
-  const bn = bigramas(nome), bt = bigramas(texto);
-  if (!bn.length || !bt.length) return 0;
-  const disponiveis = new Map();
-  for (const bg of bt) disponiveis.set(bg, (disponiveis.get(bg) || 0) + 1);
-  let acertos = 0;
-  for (const bg of bn){
-    const n = disponiveis.get(bg);
-    if (n > 0){ acertos++; disponiveis.set(bg, n - 1); }
-  }
-  return acertos / bn.length;
-}
-
-const CONDO_SUGGESTION_MIN_SCORE = 0.6; // abaixo disso é ruído — melhor não sugerir nada que sugerir errado
-const CONDO_SUGGESTION_LIMIT = 5;
-
-// Rankeia os condomínios conhecidos (whitelist + aprendidos) por similaridade com o texto bruto do OCR
-// desta linha. Usado pra gerar os chips de sugestão — o campo de nome continua texto livre, os chips são
-// só um atalho de 1 clique quando o palpite bate.
-function condominioSuggestions(rawText){
-  const norm = normalize(rawText || '');
-  if (!norm) return [];
-  const scored = todosCondominios().map(c => ({ nome: c.nome, score: bigramRecall(normalize(c.nome), norm) }));
-  scored.sort((a, b) => b.score - a.score);
-  const vistos = new Set();
-  const out = [];
-  for (const s of scored){
-    if (s.score < CONDO_SUGGESTION_MIN_SCORE) break;
-    if (vistos.has(s.nome)) continue;
-    vistos.add(s.nome);
-    out.push(s);
-    if (out.length >= CONDO_SUGGESTION_LIMIT) break;
-  }
-  return out;
 }
 
 // Dica de condomínio do lote inteiro: quando o usuário sabe de antemão que só está digitalizando
@@ -1091,18 +1060,6 @@ function ensinarBtn(row){
   return `<button type="button" class="linkBtn ensinarBtn" data-id="${row.id}">🎓 ensinar condomínio</button>`;
 }
 
-// Chips de sugestão de condomínio (1 clique) pra linhas que ainda precisam de atenção. O campo continua
-// sendo texto livre — os chips são só um atalho quando o palpite bate, calculado contra os ~145 condomínios
-// cadastrados (whitelist + aprendidos) via similaridade de bigramas sobre o texto bruto do OCR desta linha.
-function condominioChipsHtml(row){
-  const sugestoes = condominioSuggestions(row.ocrText);
-  if (!sugestoes.length) return '';
-  const chips = sugestoes.map(s =>
-    `<button type="button" class="condoChip" data-id="${row.id}" data-nome="${escapeAttr(s.nome)}">${escapeHtml(s.nome)}</button>`
-  ).join('');
-  return `<div class="condoChips"><span class="condoChipsLabel">condomínio provável:</span>${chips}</div>`;
-}
-
 function renderRow(row){
   let tr = document.getElementById('row-' + row.id);
   if (!tr){
@@ -1124,13 +1081,11 @@ function renderRow(row){
     badge = `<span class="badge low">⚠ NÃO IDENTIFICADO</span>`;
     nameCell = `<div class="status">Não foi possível determinar tipo/data automaticamente.</div>
       <input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
-      ${condominioChipsHtml(row)}
       <div class="rowActions">${verArquivoBtn(row)}${ensinarBtn(row)}</div>
       ${ocrTextDetails(row)}`;
   } else if (row.status === 'low'){
     badge = `<span class="badge low">⚠ CONFERIR (${Math.round(row.confidence*100)}%)</span>`;
     nameCell = `<input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
-      ${condominioChipsHtml(row)}
       <div class="rowActions">${confirmarBtn(row)}${verArquivoBtn(row)}${ensinarBtn(row)}</div>
       ${ocrTextDetails(row)}`;
   } else {
@@ -1180,10 +1135,6 @@ function renderRow(row){
     confirmarBtnEl.addEventListener('click', () => confirmarLinha(row));
   }
 
-  tr.querySelectorAll('.condoChip').forEach(chip => {
-    chip.addEventListener('click', () => aplicarSugestaoCondominio(row, chip.dataset.nome));
-  });
-
   const mergeCheckbox = tr.querySelector('.mergeCheckbox');
   if (mergeCheckbox){
     mergeCheckbox.addEventListener('change', () => toggleMergeSelection(row.id, mergeCheckbox.checked));
@@ -1221,41 +1172,6 @@ function reprocessarLinha(row){
   row.confidence = result.confidence;
   row.status = result.confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
   return true;
-}
-
-// Aplica uma sugestão de condomínio escolhida via chip (clique de 1 botão) a uma linha 'low'/'unidentified'.
-// Se a regra que identificou o documento (row.ruleId) é conhecida, reconstrói o nome com essa regra —
-// preservando tipo/data/unidade já extraídos, só preenchendo o condomínio. Se o documento nunca foi
-// identificado (ruleId nulo — tipo/data também não saíram), não tem template pra reconstruir: só adianta o
-// campo com o nome do condomínio e deixa o resto pro usuário completar à mão no mesmo campo de texto livre.
-function aplicarSugestaoCondominio(row, nomeCondominio){
-  const docType = DOCUMENT_TYPES.find(d => d.id === row.ruleId);
-  if (row.suggestedName) usedNames.delete(row.suggestedName.toUpperCase());
-
-  if (docType){
-    const fields = { ...row.fields, condominio: nomeCondominio };
-    const nome = docType.format(fields);
-    if (nome){
-      let confidence = docType.confidence(fields);
-      const ocrConfidence = row.ocrConfidencePct != null ? row.ocrConfidencePct / 100 : null;
-      if (ocrConfidence != null) confidence = confidence * (0.5 + 0.5 * ocrConfidence);
-      confidence = Math.min(confidence, 1);
-      row.fields = fields;
-      row.suggestedName = uniqueName(nome) + '.pdf';
-      row.confidence = confidence;
-      row.status = confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
-      renderRow(row);
-      reorderTable();
-      return;
-    }
-  }
-
-  // Sem template (ruleId nulo): só adianta o condomínio no campo, mantém marcado pra conferência.
-  row.suggestedName = uniqueName(nomeCondominio) + '.pdf';
-  row.fields = { ...row.fields, condominio: nomeCondominio };
-  row.status = row.status === 'unidentified' ? 'unidentified' : 'low';
-  renderRow(row);
-  reorderTable();
 }
 
 // Fluxo de "ensinar condomínio": pede confirmação do nome (sugerindo o que o fallback de cabeçalho
