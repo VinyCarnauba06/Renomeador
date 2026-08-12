@@ -49,8 +49,8 @@ const CONDOMINIOS = [
 ];
 
 const MESES = {
-  "JANEIRO":"JAN","FEVEREIRO":"FEV","MARÇO":"MAR","MARCO":"MAR","ABRIL":"ABR","MAIO":"MAI","JUNHO":"JUN",
-  "JULHO":"JUL","AGOSTO":"AGO","SETEMBRO":"SET","OUTUBRO":"OUT","NOVEMBRO":"NOV","DEZEMBRO":"DEZ"
+  "JANEIRO":"JAN","FEVEREIRO":"FEV","MARÇO":"MAR","MARCO":"MAR","ABRIL":"ABR","MAIO":"MAI","MALO":"MAI", // "MALO" = "Maio" com "i" lido como "l" (achado 13/ago, extrato Caixa)
+  "JUNHO":"JUN","JULHO":"JUL","AGOSTO":"AGO","SETEMBRO":"SET","OUTUBRO":"OUT","NOVEMBRO":"NOV","DEZEMBRO":"DEZ"
 };
 
 const CONFIDENCE_THRESHOLD = 0.7; // abaixo disso vira "⚠ CONFERIR" e entra na fila do botão "revisar baixa confiança"
@@ -198,6 +198,32 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.35 : 0.1) + (f.mes && f.ano ? 0.35 : 0) + (f.ucSuffix ? 0.2 : 0)
   },
   {
+    // Fatura de gás encanado (ALGÁS/Gás de Alagoas) — mesmo princípio da fatura_energia_equatorial, mas o
+    // rótulo de competência sai como "Mês/Anº: MM/AAAA" no OCR (o "o" de "Ano" costuma virar "º"). Achado
+    // 13/ago numa fatura real da ALGÁS para o Palazzo Firenze — o texto em torno do QR code/tabela de
+    // consumo sai bem ruidoso, mas "ALGAS", o rótulo de competência e o vencimento sobrevivem limpos.
+    id: "fatura_gas_algas",
+    test: (norm) => norm.includes('ALGAS') || (norm.includes('GAS NATURAL') && norm.includes('FATURA')),
+    extract: (norm, raw) => {
+      const condominio = resolverCondominio(norm, raw);
+      let mes = null, ano = null;
+      const competencia = raw.match(/M[EÊ]S\s*\/\s*AN[OºO]?[\s\S]{0,10}?(\d{2})\s*\/\s*(\d{4})/i);
+      if (competencia){
+        mes = mesPorNumero(competencia[1]);
+        ano = competencia[2];
+      } else {
+        const venc = raw.match(/VENCIMENTO[\s\S]{0,20}?(\d{2})\D(\d{2})\D(\d{2,4})/i);
+        if (venc){
+          mes = mesPorNumero(venc[2]);
+          ano = venc[3].length === 2 ? '20' + venc[3] : venc[3];
+        }
+      }
+      return { condominio, mes, ano };
+    },
+    format: f => `FATURA GAS${f.condominio ? ' ' + f.condominio : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
+  },
+  {
     // Fatura de telecom (Claro Empresas) — usa o mês/ano do vencimento (não há "mês de referência" impresso).
     id: "fatura_telecom_claro",
     test: (norm) => /CLARO[\s\-]*EMPRESAS/.test(norm),
@@ -255,7 +281,11 @@ const DOCUMENT_TYPES = [
   {
     // Extrato de conta corrente (sistema "Gerenciador Caixa") — usa o mês do período do extrato.
     id: "extrato_conta_corrente",
-    test: (norm) => norm.includes('GERENCIADOR')
+    // "GERENCIADOR" é logotipo estilizado da Caixa e o OCR quase nunca lê certo (saiu "GERENCIADQÃQ",
+    // "GERENOADQR" em exemplos reais de 12/ago — mesma classe de problema que "SICREDI" já tinha em outras
+    // regras). "SAC CAIXA"/"OUVIDORIA" são texto normal no rodapé do extrato e saem limpos do OCR mesmo
+    // quando o topo da página está ruim, então servem de sinal alternativo tão confiável quanto o logotipo.
+    test: (norm) => (norm.includes('GERENCIADOR') || norm.includes('SAC CAIXA') || norm.includes('OUVIDORIA'))
       && (/EXTRATO\s+POR\s+PER[IÍ]ODO/.test(norm) || semEspacos(norm).includes('EXTRATOPORPERIODO')),
     extract: (norm, raw) => {
       const cliente = raw.match(/CLIENTE[\s\S]{0,5}?([^\n]+)/i);
@@ -427,8 +457,12 @@ const DOCUMENT_TYPES = [
     // específica (Sicredi, rateio por unidade etc.) reconheceu o sistema por trás. Achado 12/ago num boleto
     // Bradesco: o texto "PAGÁVEL PREFERENCIALMENTE" se repete 2-3x na página (via costumam imprimir a mesma
     // ficha em duplicata/triplicata) — mesmo que uma cópia saia com OCR ruim, as outras cobrem.
+    // Segundo sinal (13/ago): boletos gerados por plataforma de cobrança (Pix + QR code, sem "ficha de
+    // compensação" tradicional) não têm essa frase, mas sempre imprimem os 3 campos juntos — Beneficiário,
+    // Pagador e Vencimento — o que já é uma assinatura confiável de boleto bancário nesse layout também.
     id: "boleto_bancario_generico",
-    test: (norm) => /PAG[AÁ]VEL\s+PREFERENCIALMENTE/.test(norm) || semEspacos(norm).includes('PAGAVELPREFERENCIALMENTE'),
+    test: (norm) => /PAG[AÁ]VEL\s+PREFERENCIALMENTE/.test(norm) || semEspacos(norm).includes('PAGAVELPREFERENCIALMENTE')
+      || (norm.includes('BENEFICIARIO') && norm.includes('PAGADOR') && norm.includes('VENCIMENTO')),
     extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
     format: f => `BOLETO${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
     confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
