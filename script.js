@@ -1448,6 +1448,12 @@ reviewBtn.addEventListener('click', async () => {
   progressFill.style.width = '0%';
 
   for (const row of pending){
+    // Guarda o status de ANTES da revisão — é o valor certo pra voltar se a revisão não melhorar nada.
+    // Bug corrigido (13/ago): o código antigo usava `row.suggestedName ? 'low' : 'unidentified'` pra decidir
+    // isso, mas suggestedName está SEMPRE preenchido (até documento nunca identificado ganha o nome do
+    // arquivo original como sugestão) — então toda revisão sem melhora virava '⚠ CONFERIR (0%)' mesmo
+    // quando o documento continuava, de fato, não identificado.
+    const statusAntesDaRevisao = row.status;
     row.status = 'processing';
     renderRow(row);
     try {
@@ -1470,16 +1476,16 @@ reviewBtn.addEventListener('click', async () => {
         row.ocrConfidencePct = Math.round(improved.ocrConfidence * 100);
         row.rotationUsed = improved.rotationUsed;
         row.reviewed = true;
-        row.status = row.suggestedName ? 'low' : 'unidentified';
+        row.status = statusAntesDaRevisao;
       } else {
         // texto nativo (não veio de OCR) — nada a revisar
         row.reviewed = true;
-        row.status = row.suggestedName ? 'low' : 'unidentified';
+        row.status = statusAntesDaRevisao;
       }
     } catch (err){
       console.error(err);
       row.reviewed = true;
-      row.status = row.suggestedName ? 'low' : 'unidentified';
+      row.status = statusAntesDaRevisao;
     }
     done++;
     progressLabel.textContent = `Revisando ${done} de ${total} documento(s) de baixa confiança...`;
