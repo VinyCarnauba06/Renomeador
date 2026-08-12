@@ -158,7 +158,16 @@ const DOCUMENT_TYPES = [
     // Fatura de energia elétrica (Equatorial). O mesmo condomínio pode ter vários medidores/UCs
     // cobrados no mesmo mês — por isso o nome leva os 4 últimos dígitos da UC como diferenciador.
     id: "fatura_energia_equatorial",
-    test: (norm) => norm.includes('EQUATORIAL'),
+    // Achado real num lote de 91 documentos (12/ago): um "DEMONSTRATIVO DE RECEITAS E DESPESAS" (relatório
+    // administrativo PRO-LAR que apenas CITA a Equatorial como um item de despesa pago) casou com o teste
+    // antigo (só `includes('EQUATORIAL')`) e virou "FATURA EQUATORIAL" por engano — mesmo problema que o
+    // comentário acima já descreve para "Protocolo de autorização" de DANFE. Fatura de verdade sempre tem
+    // "CONTA MÊS" ou "NÚMERO DA UC" impressos (são os próprios campos que o extract() já busca abaixo);
+    // relatório administrativo que só cita o nome da concessionária, não.
+    test: (norm) => norm.includes('EQUATORIAL')
+      && (norm.includes('CONTA MES') || norm.includes('CONTA MÊS') || norm.includes('NUMERO DA UC') || norm.includes('NÚMERO DA UC'))
+      && !norm.includes('DEMONSTRATIVO DE RECEITAS')
+      && !norm.includes('DESPESAS POR GRUPO'),
     extract: (norm, raw) => {
       const condominio = resolverCondominio(norm, raw);
       const contaMes = raw.match(/CONTA\s*M[EÊ]S[\s\S]{0,15}?(\d{2})\s*\/\s*(\d{4})/i);
@@ -203,12 +212,17 @@ const DOCUMENT_TYPES = [
   },
   {
     // Comprovante de pagamento via Pix (qualquer banco) — usa a data em que a transação foi realizada.
+    // Achado no lote de 91 (12/ago): a variante Sicoob ("COMPROVANTE DE EFETIVAÇÃO DE PAGAMENTO PIX") usa
+    // o rótulo "Data do pagamento" em vez de "Realizado em" — adicionado como rótulo alternativo de data,
+    // mantendo os dois exigidos juntos no teste (evita casar com qualquer menção solta a "pagamento pix"
+    // dentro de um extrato genérico, que teria linhas de PIX sem nenhum desses rótulos de data ao lado).
     id: "comprovante_pix",
     test: (norm) => (/PAGAMENTO\s+PIX/.test(norm) || semEspacos(norm).includes('PAGAMENTOPIX'))
-      && (/REALIZADO\s+EM/.test(norm) || semEspacos(norm).includes('REALIZADOEM')),
+      && (/REALIZADO\s+EM/.test(norm) || semEspacos(norm).includes('REALIZADOEM') || /DATA\s+D[OE]\s+PAGAMENTO/.test(norm)),
     extract: (norm, raw) => {
       const condominio = resolverCondominio(norm, raw);
-      const m = raw.match(/REALIZADO\s+EM[\s\S]{0,15}?(\d{2}\D\d{2}\D\d{4})/i);
+      let m = raw.match(/REALIZADO\s+EM[\s\S]{0,15}?(\d{2}\D\d{2}\D\d{4})/i);
+      if (!m) m = raw.match(/DATA\s+D[OE]\s+PAGAMENTO[\s\S]{0,15}?(\d{2}\D\d{2}\D\d{4})/i);
       const dataDDMM = m ? findData(m[1]).dataDDMM : null;
       return { condominio, dataDDMM };
     },
@@ -341,6 +355,41 @@ const DOCUMENT_TYPES = [
     format: f => `BOLETO RATEIO${f.condominio ? ' ' + f.condominio : ''}${f.unidade ? ' ' + f.unidade : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
     confidence: f => (f.condominio ? 0.35 : 0.1) + (f.mes && f.ano ? 0.35 : 0) + (f.unidade ? 0.2 : 0)
   },
+  /* ---- Regras adicionadas a partir do lote real de 91 documentos testado em 12/ago ---- */
+  {
+    // Relatório administrativo "DESPESAS POR GRUPO E CLASSE" (sistema PRO-LAR). O condomínio aparece como
+    // texto solto logo abaixo do título (ex.: "Maison Grand Versailles") — resolverCondominio já pega isso
+    // via busca no texto inteiro, sem precisar de regex de posição. O diferenciador é o Grupo/Classe do
+    // relatório (ex.: Extintores, Investimentos, Manutenção) — um mesmo condomínio/data gera vários desses
+    // relatórios no mesmo lote (um por classe de despesa), por isso a categoria entra no nome.
+    id: "relatorio_despesas_prolar",
+    test: (norm) => norm.includes('DESPESAS POR GRUPO E CLASSE'),
+    extract: (norm, raw) => {
+      const condominio = resolverCondominio(norm, raw);
+      const grupoM = raw.match(/Grupo:\s*([A-Za-zÀ-ÖØ-öø-ÿ\s]{2,30}?)\s*Classe/i);
+      const classeM = raw.match(/Classe:\s*([A-Za-zÀ-ÖØ-öø-ÿ\s]{2,30}?)\s*(?:Fornecedor|[\n\r])/i);
+      const generico = v => !v || ['TODOS', 'TODAS'].includes(normalize(v).trim());
+      const classe = classeM ? classeM[1].trim() : null;
+      const grupo = grupoM ? grupoM[1].trim() : null;
+      const categoria = !generico(classe) ? classe : (!generico(grupo) ? grupo : null);
+      return { condominio, categoria, ...findData(raw) };
+    },
+    format: f => `RELATORIO DESPESAS${f.condominio ? ' ' + f.condominio : ''}${f.categoria ? ' ' + f.categoria.toUpperCase() : ''}${f.dataDDMM ? ' ' + f.dataDDMM : ''}`,
+    confidence: f => (f.condominio ? 0.4 : 0.1) + (f.categoria ? 0.2 : 0) + (f.dataDDMM ? 0.3 : 0) + 0.1
+  },
+  {
+    // Recibo avulso sem layout formal de boleto/cartório — prestadores pequenos (dedetização, extintor,
+    // retirada de entulho) e recibos "Recebi(emos) de" do sistema PRO-LAR. Sinal: frase "RECEBI(EMOS)
+    // DO/DE ..." — não depende da palavra "RECIBO" aparecer (vários exemplos reais do lote de 91 nem
+    // imprimem essa palavra, só "RECEBI DO CONDOMÍNIO X..."). Fica por último entre as regras financeiras
+    // porque o sinal é genérico o bastante pra não competir com boleto_rateio_unidade/recibo_cartorio, que
+    // são mais específicos e já tiveram sua chance antes desta na lista.
+    id: "recibo_generico",
+    test: (norm) => /RECEB(I|EMOS)\s*(\(EMOS\))?\s+(DO|DE)\b/.test(norm),
+    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
+    format: f => `RECIBO${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
+  },
   {
     // Genérico: PROTOCOLO/TERMO + condomínio + data completa
     id: "generico_tipo_condominio_data",
@@ -469,6 +518,18 @@ function findCondominioFallback(rawText){
   m = rawText.match(/COND\.?\s+(?:DO\s+)?EDIF\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
   if (m) return m[1].trim().toUpperCase();
   m = rawText.match(/\bEDIF\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
+  if (m) return m[1].trim().toUpperCase();
+  // Rótulo "Associado:" — comum em extratos/comprovantes de cooperativa de crédito (Sicredi/Sicoob),
+  // independente do tipo específico de documento (extrato, comprovante PIX, débito automático etc.).
+  // Achado no lote de 91 (12/ago): vários documentos Sicredi vinham com condomínio 100% legível aqui mas
+  // sem nenhum dos padrões "EDIFÍCIO"/"EDF" acima, então caíam sem condomínio nenhum.
+  m = rawText.match(/ASSOCIADO:?\s*([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
+  if (m) return m[1].trim().toUpperCase();
+  // Último recurso, mais permissivo: "CONDOMÍNIO <nome>" direto, sem "EDIFÍCIO"/"EDF" no meio — comum em
+  // recibos avulsos ("Recebi do Condomínio Mirante Garden...", "Recebemos de Condomínio Dony Coutinho...").
+  // Fica por último e mais restrito (só roda se nada acima casou) porque é mais fácil de capturar ruído
+  // (ex. "CONDOMÍNIO E MORADORES...") do que os padrões específicos acima.
+  m = rawText.match(/CONDOM[IÍ]NIO\s+(?:DO\s+)?(?:RESIDENCIAL\s+)?([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
   if (m) return m[1].trim().toUpperCase();
   return null;
 }
