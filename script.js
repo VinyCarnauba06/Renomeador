@@ -288,6 +288,23 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
   },
   {
+    // Extrato "Captação Remunerada" (Sicoob) — variante de extrato de aplicação com rótulos diferentes do
+    // extrato_aplicacao_sicredi acima ("Captação Remunerada"/"Extrato Consolidado" em vez de "Extrato de
+    // Aplicação"/"Depósito a Prazo", e "PERÍODO: MÊS/ANO" em vez de "Período de consulta"). Achado 12/ago
+    // com texto de OCR limpo (condomínio e período 100% legíveis), não é regra especulativa.
+    id: "extrato_captacao_sicoob",
+    test: (norm) => norm.includes('CAPTACAO REMUNERADA'),
+    extract: (norm, raw) => {
+      const condominio = resolverCondominio(norm, raw);
+      const m = raw.match(/PER[IÍ]ODO:?\s*([A-Za-zà-úÀ-Ú]+)\s*\/\s*(\d{4})/i);
+      const mes = m && MESES[normalize(m[1])] ? MESES[normalize(m[1])] : null;
+      const ano = m ? m[2] : null;
+      return { condominio, mes, ano };
+    },
+    format: f => `EXTRATO CAPTACAO${f.condominio ? ' ' + f.condominio : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
+  },
+  {
     // Recibo de cartório — usa a data por extenso do rodapé ("Maceió - AL, ..., DD de MÊS de AAAA").
     id: "recibo_cartorio",
     test: (norm) => /CART[OÓ]RIO/.test(norm) && /RECIBO/.test(norm),
@@ -405,6 +422,18 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
   },
   {
+    // Boleto bancário genérico (ficha de compensação/recibo do pagador de qualquer banco/beneficiário) —
+    // pega o layout padrão impresso em praticamente todo boleto brasileiro, quando nenhuma regra mais
+    // específica (Sicredi, rateio por unidade etc.) reconheceu o sistema por trás. Achado 12/ago num boleto
+    // Bradesco: o texto "PAGÁVEL PREFERENCIALMENTE" se repete 2-3x na página (via costumam imprimir a mesma
+    // ficha em duplicata/triplicata) — mesmo que uma cópia saia com OCR ruim, as outras cobrem.
+    id: "boleto_bancario_generico",
+    test: (norm) => /PAG[AÁ]VEL\s+PREFERENCIALMENTE/.test(norm) || semEspacos(norm).includes('PAGAVELPREFERENCIALMENTE'),
+    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
+    format: f => `BOLETO${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
+  },
+  {
     // Genérico: PROTOCOLO/TERMO + condomínio + data completa
     id: "generico_tipo_condominio_data",
     test: (norm) => !!findTipoGenerico(norm),
@@ -517,39 +546,65 @@ function findCondominio(text){
   return null;
 }
 
-// Fallback: quando o condomínio não está na whitelist, tenta extrair do cabeçalho do documento.
-// Cobre padrões como "CONDOMÍNIO EDIFÍCIO X", "CONDOMÍNIO DO EDIFÍCIO X", "EDF. X - ...".
+// Fim de captura do nome do condomínio no cabeçalho: quebra de linha, 2+ espaços, número isolado (quase
+// sempre apartamento/telefone/código vazando da linha seguinte), fim de string, ou pontuação de corte.
+const FIM_NOME_CONDOMINIO = '(?:[\\n\\r]|\\s{2,}|\\s\\d|$|\\.|,|-|—)';
+
+// Lista de rótulos que costumam preceder o nome do condomínio no cabeçalho do documento — da forma mais
+// específica/confiável pra mais curta/ambígua. A ordem importa: um rótulo curto ("ED", "CON") só é tentado
+// se nenhum rótulo mais longo e específico casou antes, porque sozinho é fácil de disparar em falso.
+// Cada entrada é só o texto do rótulo (sem acento — a função monta a variante COM e SEM acento e com/sem
+// ponto sozinha) mais uma flag dizendo se a própria palavra do rótulo faz parte do nome final (é o caso de
+// "RESIDENCIAL"/"EMPRESARIAL" quando aparecem soltos — muitos condomínios têm isso no nome de verdade, ex.
+// "LIV RESIDENCE" já cadastrado na whitelist) ou se é só uma palavra administrativa a pular (CONDOMÍNIO,
+// COND, EDF, ED, CON).
+const CONDOMINIO_LABELS = [
+  { label: 'CONDOMINIO DO EDIFICIO' },
+  { label: 'CONDOMINIO EDIFICIO' },
+  { label: 'COND DO EDIFICIO' },
+  { label: 'COND EDIFICIO' },
+  { label: 'COND DO EDIF' }, // abreviação de 4 letras: "Cond. do Edif. X"
+  { label: 'COND EDIF' },
+  { label: 'EDIFICIO RESIDENCIAL', manterRotuloNoNome: 'RESIDENCIAL' },
+  { label: 'EDIFICIO EMPRESARIAL', manterRotuloNoNome: 'EMPRESARIAL' },
+  { label: 'EDIFICIO' },
+  { label: 'EDIF' }, // abreviação de 4 letras sozinha
+  { label: 'EDF' },  // abreviação de 3 letras sozinha (diferente de EDIF)
+  { label: 'ED RESIDENCIAL', manterRotuloNoNome: 'RESIDENCIAL' },
+  { label: 'ED EMPRESARIAL', manterRotuloNoNome: 'EMPRESARIAL' },
+  { label: 'COND ED' },
+  { label: 'ASSOCIADO' }, // rótulo de cooperativa de crédito (Sicredi/Sicoob), não é sobre tipo de prédio
+  { label: 'CONDOMINIO' }, // "CONDOMÍNIO <nome>" direto, sem EDIFÍCIO/EDF no meio
+  { label: 'RESIDENCIAL', manterRotuloNoNome: 'RESIDENCIAL' }, // bare, sem ED/EDIFÍCIO na frente
+  { label: 'EMPRESARIAL', manterRotuloNoNome: 'EMPRESARIAL' },
+  { label: 'COND' }, // abreviação de 4 letras sozinha, sem EDIFÍCIO/EDF/ED depois
+  { label: 'ED' }, // 2 letras sozinha — o mais ambíguo de todos, por isso é o último
+  { label: 'CON' }, // 3 letras sozinha — igualmente ambíguo, último recurso
+];
+
+// Monta a regex de um rótulo: aceita ponto opcional depois de cada palavra abreviada, e é insensível a
+// acento porque compara contra rawText com a flag /i mas sem normalizar — então cada vogal acentuável do
+// rótulo vira uma classe [VÁÀÂÃ] etc. (cobre "CONDOMÍNIO" e "CONDOMINIO", "EDIFÍCIO" e "EDIFICIO").
+function regexDoRotulo(label){
+  const acentos = { A: '[AÁÀÂÃ]', E: '[EÉÊ]', I: '[IÍ]', O: '[OÓÔÕ]', U: '[UÚ]' };
+  const partes = label.split(' ').map(palavra => {
+    const comAcento = palavra.split('').map(ch => acentos[ch] || ch).join('');
+    return comAcento + '\\.?';
+  });
+  return new RegExp('\\b' + partes.join('\\s+') + '\\s+([A-Za-zÀ-ÖØ-öø-ÿ\'\\s]{2,40}?)' + FIM_NOME_CONDOMINIO, 'i');
+}
+
+// Fallback: quando o condomínio não está na whitelist, tenta extrair do cabeçalho do documento, testando
+// CONDOMINIO_LABELS em ordem até um bater. Cobre "CONDOMÍNIO EDIFÍCIO X", "CONDOMÍNIO DO EDIFÍCIO X",
+// "EDF. X", "COND. X", "Associado: X" etc. — com e sem acento, com e sem ponto de abreviação.
 function findCondominioFallback(rawText){
-  let m = rawText.match(/CONDOM[IÍ]NIO\s+(?:DO\s+)?ED[IÍ]F[IÍ]CIO\s+([A-Za-zÀ-ÖØ-öø-ÿ'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
-  if (m) return m[1].trim().toUpperCase();
-  m = rawText.match(/EDF\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ'\s]{2,40}?)\s*[-–]/i);
-  if (m) return m[1].trim().toUpperCase();
-  // "Cond." abreviado + "Edifício" por extenso (comum em declarações de administradoras, ex.: "Cond. do
-  // Edifício Via Veneto"). Diferente do padrão acima porque só a primeira palavra vem abreviada.
-  m = rawText.match(/COND\.?\s+(?:DO\s+)?ED[IÍ]F[IÍ]CIO\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
-  if (m) return m[1].trim().toUpperCase();
-  // Formas abreviadas comuns em extrato/gerenciador de caixa: "COND DO EDIF X", "COND. EDIF. X", "EDIF. X"
-  m = rawText.match(/COND\.?\s+(?:DO\s+)?EDIF\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
-  if (m) return m[1].trim().toUpperCase();
-  m = rawText.match(/\bEDIF\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
-  if (m) return m[1].trim().toUpperCase();
-  // "COND ED X" — abreviação de 2 letras só, sem ponto (achado 12/ago numa nota de cobrança OTIS: "Tomador
-  // de Serviços: COND ED REVENANT NERI"). Mais permissivo que os padrões "EDIF"/"EDIFÍCIO" acima, por isso
-  // entra depois deles na ordem de tentativa.
-  m = rawText.match(/\bCOND\.?\s+ED\.?\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
-  if (m) return m[1].trim().toUpperCase();
-  // Rótulo "Associado:" — comum em extratos/comprovantes de cooperativa de crédito (Sicredi/Sicoob),
-  // independente do tipo específico de documento (extrato, comprovante PIX, débito automático etc.).
-  // Achado no lote de 91 (12/ago): vários documentos Sicredi vinham com condomínio 100% legível aqui mas
-  // sem nenhum dos padrões "EDIFÍCIO"/"EDF" acima, então caíam sem condomínio nenhum.
-  m = rawText.match(/ASSOCIADO:?\s*([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
-  if (m) return m[1].trim().toUpperCase();
-  // Último recurso, mais permissivo: "CONDOMÍNIO <nome>" direto, sem "EDIFÍCIO"/"EDF" no meio — comum em
-  // recibos avulsos ("Recebi do Condomínio Mirante Garden...", "Recebemos de Condomínio Dony Coutinho...").
-  // Fica por último e mais restrito (só roda se nada acima casou) porque é mais fácil de capturar ruído
-  // (ex. "CONDOMÍNIO E MORADORES...") do que os padrões específicos acima.
-  m = rawText.match(/CONDOM[IÍ]NIO\s+(?:DO\s+)?(?:RESIDENCIAL\s+)?([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)(?:[\n\r]|\s{2,}|$|\.|,|-|—)/i);
-  if (m) return m[1].trim().toUpperCase();
+  for (const { label, manterRotuloNoNome } of CONDOMINIO_LABELS){
+    const m = rawText.match(regexDoRotulo(label));
+    if (!m) continue;
+    const nome = m[1].trim();
+    if (!nome) continue;
+    return (manterRotuloNoNome ? manterRotuloNoNome + ' ' + nome : nome).trim().toUpperCase();
+  }
   return null;
 }
 
