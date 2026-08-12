@@ -56,6 +56,14 @@ const MESES = {
 const CONFIDENCE_THRESHOLD = 0.7; // abaixo disso vira "⚠ CONFERIR" e entra na fila do botão "revisar baixa confiança"
 const MIN_TEXT_LEN_TO_SKIP_OCR = 20; // se o PDF já tiver texto pesquisável com pelo menos isso, não faz OCR
 
+// Regras cujo nome final NUNCA leva condomínio por design (ver comentários nas próprias regras em
+// DOCUMENT_TYPES). Para todas as outras, condomínio ausente nunca pode resultar em auto-aceite: mesmo que
+// tipo+data pontuem alto o bastante pra passar de CONFIDENCE_THRESHOLD sozinhos (ex.: "TERMO 08.08" sem
+// condomínio já batia 0.75 e virava "✓ ALTA CONFIANÇA" sem chance de correção), o documento é o dado mais
+// importante do nome do arquivo pra esse fluxo — por isso fica de fora do cálculo de score e vira um corte
+// duro em identifyDocument().
+const RULES_SEM_CONDOMINIO = new Set(['reservas_fim_de_semana', 'protocolo_entrega_boletos']);
+
 /* ============================================================
    TIPOS DE DOCUMENTO — regras de negócio aprendidas dos exemplos reais
    ============================================================
@@ -465,6 +473,56 @@ function findCondominioFallback(rawText){
   return null;
 }
 
+// Similaridade por bigramas entre o nome de um condomínio e o texto do OCR inteiro, medida como RECALL
+// (quantos bigramas do nome aparecem em algum lugar do texto ÷ total de bigramas do nome) — não Dice
+// simétrico. Dice pleno penaliza pelo tamanho do texto inteiro (documento longo dilui o score mesmo com o
+// nome presente e correto); recall isola só "o quanto da assinatura do nome apareceu", o que é robusto a
+// OCR reordenando/quebrando trechos (linha do meio de tabela, quebra de coluna) sem exigir alinhamento
+// contíguo. Custo O(tamanho do texto), rápido o bastante pra rodar contra 145+ condomínios só nas linhas
+// que precisam de revisão (não no fluxo automático).
+function bigramas(str){
+  const s = str.replace(/\s+/g, '');
+  const out = [];
+  for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2));
+  return out;
+}
+
+function bigramRecall(nome, texto){
+  const bn = bigramas(nome), bt = bigramas(texto);
+  if (!bn.length || !bt.length) return 0;
+  const disponiveis = new Map();
+  for (const bg of bt) disponiveis.set(bg, (disponiveis.get(bg) || 0) + 1);
+  let acertos = 0;
+  for (const bg of bn){
+    const n = disponiveis.get(bg);
+    if (n > 0){ acertos++; disponiveis.set(bg, n - 1); }
+  }
+  return acertos / bn.length;
+}
+
+const CONDO_SUGGESTION_MIN_SCORE = 0.6; // abaixo disso é ruído — melhor não sugerir nada que sugerir errado
+const CONDO_SUGGESTION_LIMIT = 5;
+
+// Rankeia os condomínios conhecidos (whitelist + aprendidos) por similaridade com o texto bruto do OCR
+// desta linha. Usado pra gerar os chips de sugestão — o campo de nome continua texto livre, os chips são
+// só um atalho de 1 clique quando o palpite bate.
+function condominioSuggestions(rawText){
+  const norm = normalize(rawText || '');
+  if (!norm) return [];
+  const scored = todosCondominios().map(c => ({ nome: c.nome, score: bigramRecall(normalize(c.nome), norm) }));
+  scored.sort((a, b) => b.score - a.score);
+  const vistos = new Set();
+  const out = [];
+  for (const s of scored){
+    if (s.score < CONDO_SUGGESTION_MIN_SCORE) break;
+    if (vistos.has(s.nome)) continue;
+    vistos.add(s.nome);
+    out.push(s);
+    if (out.length >= CONDO_SUGGESTION_LIMIT) break;
+  }
+  return out;
+}
+
 // Dica de condomínio do lote inteiro: quando o usuário sabe de antemão que só está digitalizando
 // documentos de UM condomínio (ex.: "hoje é só o INNOVARE"), ele seleciona isso no dropdown antes de
 // soltar os arquivos. Essa dica só é usada como ÚLTIMO recurso — se o próprio conteúdo do documento já
@@ -550,6 +608,11 @@ function identifyDocument(rawText, ocrConfidence){
     if (!nome) continue; // detector reconheceu o tipo mas faltou campo obrigatório -> tenta o próximo (mais genérico)
     let confidence = docType.confidence(fields);
     if (ocrConfidence != null) confidence = confidence * (0.5 + 0.5 * ocrConfidence); // penaliza OCR ruim
+    // Corte duro: sem condomínio resolvido, nunca deixa passar do limiar de auto-aceite, mesmo que
+    // tipo+data sozinhos já somem confiança suficiente (ver RULES_SEM_CONDOMINIO acima).
+    if (!fields.condominio && !RULES_SEM_CONDOMINIO.has(docType.id)){
+      confidence = Math.min(confidence, CONFIDENCE_THRESHOLD - 0.01);
+    }
     confidence = Math.min(confidence, 1);
     return { nome, confidence, ruleId: docType.id, fields: { ...fields, ...extras } };
   }
@@ -845,6 +908,7 @@ async function handleFiles(files){
         const { text, ocrConfidence, usedOCR, rotationUsed } = await extractPdfText(file);
         const result = identifyDocument(text, ocrConfidence);
         row.fields = result.fields;
+        row.ruleId = result.ruleId;
         row.usedOCR = usedOCR;
         row.rotationUsed = rotationUsed;
         row.ocrText = text;
@@ -960,6 +1024,18 @@ function ensinarBtn(row){
   return `<button type="button" class="linkBtn ensinarBtn" data-id="${row.id}">🎓 ensinar condomínio</button>`;
 }
 
+// Chips de sugestão de condomínio (1 clique) pra linhas que ainda precisam de atenção. O campo continua
+// sendo texto livre — os chips são só um atalho quando o palpite bate, calculado contra os ~145 condomínios
+// cadastrados (whitelist + aprendidos) via similaridade de bigramas sobre o texto bruto do OCR desta linha.
+function condominioChipsHtml(row){
+  const sugestoes = condominioSuggestions(row.ocrText);
+  if (!sugestoes.length) return '';
+  const chips = sugestoes.map(s =>
+    `<button type="button" class="condoChip" data-id="${row.id}" data-nome="${escapeAttr(s.nome)}">${escapeHtml(s.nome)}</button>`
+  ).join('');
+  return `<div class="condoChips"><span class="condoChipsLabel">condomínio provável:</span>${chips}</div>`;
+}
+
 function renderRow(row){
   let tr = document.getElementById('row-' + row.id);
   if (!tr){
@@ -981,11 +1057,13 @@ function renderRow(row){
     badge = `<span class="badge low">⚠ NÃO IDENTIFICADO</span>`;
     nameCell = `<div class="status">Não foi possível determinar tipo/data automaticamente.</div>
       <input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
+      ${condominioChipsHtml(row)}
       <div class="rowActions">${verArquivoBtn(row)}${ensinarBtn(row)}</div>
       ${ocrTextDetails(row)}`;
   } else if (row.status === 'low'){
     badge = `<span class="badge low">⚠ CONFERIR (${Math.round(row.confidence*100)}%)</span>`;
     nameCell = `<input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
+      ${condominioChipsHtml(row)}
       <div class="rowActions">${confirmarBtn(row)}${verArquivoBtn(row)}${ensinarBtn(row)}</div>
       ${ocrTextDetails(row)}`;
   } else {
@@ -1023,6 +1101,10 @@ function renderRow(row){
     confirmarBtnEl.addEventListener('click', () => confirmarLinha(row));
   }
 
+  tr.querySelectorAll('.condoChip').forEach(chip => {
+    chip.addEventListener('click', () => aplicarSugestaoCondominio(row, chip.dataset.nome));
+  });
+
   const input = tr.querySelector('.nameInput');
   if (input){
     // Se o usuário digitou o nome à mão (em vez de aceitar a sugestão), considera confirmado: 100% de
@@ -1050,10 +1132,46 @@ function reprocessarLinha(row){
 
   if (row.suggestedName) usedNames.delete(row.suggestedName.toUpperCase());
   row.fields = result.fields;
+  row.ruleId = result.ruleId;
   row.suggestedName = uniqueName(result.nome) + '.pdf';
   row.confidence = result.confidence;
   row.status = result.confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
   return true;
+}
+
+// Aplica uma sugestão de condomínio escolhida via chip (clique de 1 botão) a uma linha 'low'/'unidentified'.
+// Se a regra que identificou o documento (row.ruleId) é conhecida, reconstrói o nome com essa regra —
+// preservando tipo/data/unidade já extraídos, só preenchendo o condomínio. Se o documento nunca foi
+// identificado (ruleId nulo — tipo/data também não saíram), não tem template pra reconstruir: só adianta o
+// campo com o nome do condomínio e deixa o resto pro usuário completar à mão no mesmo campo de texto livre.
+function aplicarSugestaoCondominio(row, nomeCondominio){
+  const docType = DOCUMENT_TYPES.find(d => d.id === row.ruleId);
+  if (row.suggestedName) usedNames.delete(row.suggestedName.toUpperCase());
+
+  if (docType){
+    const fields = { ...row.fields, condominio: nomeCondominio };
+    const nome = docType.format(fields);
+    if (nome){
+      let confidence = docType.confidence(fields);
+      const ocrConfidence = row.ocrConfidencePct != null ? row.ocrConfidencePct / 100 : null;
+      if (ocrConfidence != null) confidence = confidence * (0.5 + 0.5 * ocrConfidence);
+      confidence = Math.min(confidence, 1);
+      row.fields = fields;
+      row.suggestedName = uniqueName(nome) + '.pdf';
+      row.confidence = confidence;
+      row.status = confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
+      renderRow(row);
+      reorderTable();
+      return;
+    }
+  }
+
+  // Sem template (ruleId nulo): só adianta o condomínio no campo, mantém marcado pra conferência.
+  row.suggestedName = uniqueName(nomeCondominio) + '.pdf';
+  row.fields = { ...row.fields, condominio: nomeCondominio };
+  row.status = row.status === 'unidentified' ? 'unidentified' : 'low';
+  renderRow(row);
+  reorderTable();
 }
 
 // Fluxo de "ensinar condomínio": pede confirmação do nome (sugerindo o que o fallback de cabeçalho
@@ -1141,6 +1259,7 @@ reviewBtn.addEventListener('click', async () => {
         row.ocrConfidencePct = Math.round(improved.ocrConfidence * 100);
         row.rotationUsed = improved.rotationUsed;
         row.fields = improved.result.fields;
+        row.ruleId = improved.result.ruleId;
         row.suggestedName = uniqueName(improved.result.nome) + '.pdf';
         row.confidence = improved.result.confidence;
         row.status = improved.result.confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
