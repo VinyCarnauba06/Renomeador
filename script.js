@@ -224,6 +224,17 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
   },
   {
+    // Fatura de água/esgoto (AMBIENTAL - concessionária de saneamento da região metropolitana de Maceió).
+    // Achado 13/ago numa digitalização de baixíssima qualidade (texto quase todo ilegível) — mesmo assim o
+    // nome da concessionária e o rótulo "COND" antes do nome do condomínio sobrevivem limpos o bastante,
+    // então vale reconhecer o tipo mesmo quando a data não sai (confiança cai, mas evita "não identificado").
+    id: "fatura_agua_ambiental",
+    test: (norm) => norm.includes('AMBIENTAL') && (norm.includes('AGUA') || norm.includes('ESGOTO')),
+    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
+    format: f => `FATURA AGUA${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
+  },
+  {
     // Fatura de telecom (Claro Empresas) — usa o mês/ano do vencimento (não há "mês de referência" impresso).
     id: "fatura_telecom_claro",
     test: (norm) => /CLARO[\s\-]*EMPRESAS/.test(norm),
@@ -335,6 +346,34 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
   },
   {
+    // Extrato de conta corrente do Internet Banking Sicredi ("Associado: X ... Extrato ... Dados referentes
+    // ao período DD/MM/AAAA a DD/MM/AAAA") — diferente do extrato_conta_corrente (Caixa/Gerenciador) e do
+    // extrato_aplicacao_sicredi (conta de investimento/depósito a prazo): este é o extrato de movimentação
+    // da conta corrente do próprio associado. Achado 13/ago em 4 exemplos reais do mesmo lote. Usa o mês
+    // final do período como referência (o extrato normalmente cobre um único mês corrido).
+    // O rótulo "Dados/Dadas referentes ao período" costuma sair bem mal do OCR (achado real: "iefef-L-r-tei
+    // ao panini-:." para "referentes ao período") — não é confiável como parte do teste. "Associado" +
+    // "Extrato" juntos já são específicos o bastante desse template do Internet Banking Sicredi.
+    id: "extrato_conta_corrente_sicredi",
+    test: (norm) => norm.includes('ASSOCIADO') && norm.includes('EXTRATO'),
+    extract: (norm, raw) => {
+      const associado = raw.match(/ASSOCIADO\s*:?\s*([^\n]+)/i);
+      let condominio = associado ? (findCondominio(normalize(associado[1])) || findCondominioFallback(associado[1])) : null;
+      if (!condominio) condominio = resolverCondominio(norm, raw);
+      // "DD/MM/AAAA a DD/MM/AAAA" — usa a segunda data (fim do período) como referência do extrato. Grupos
+      // capturados separadamente (não a string inteira) porque o separador da 2ª data às vezes não é uma
+      // barra de verdade (achado real: "31/07i2025", o "/" lido como "i") — findData() exige um dos
+      // separadores [/\-.] explicitamente, então repassar a string capturada pra ela falharia de novo.
+      const periodo = raw.match(/\d{2}\D(\d{2})\D\d{4}\s*a\s*\d{2}\D(\d{2})\D(\d{4})/i);
+      let mes = null, ano = null;
+      if (periodo){ mes = mesPorNumero(periodo[2]); ano = periodo[3]; }
+      else { const d = findData(raw); mes = d.mes; ano = d.ano; }
+      return { condominio, mes, ano };
+    },
+    format: f => `EXTRATO${f.condominio ? ' ' + f.condominio : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
+  },
+  {
     // Recibo de cartório — usa a data por extenso do rodapé ("Maceió - AL, ..., DD de MÊS de AAAA").
     id: "recibo_cartorio",
     test: (norm) => /CART[OÓ]RIO/.test(norm) && /RECIBO/.test(norm),
@@ -433,9 +472,22 @@ const DOCUMENT_TYPES = [
     // imprimem essa palavra, só "RECEBI DO CONDOMÍNIO X..."). Fica por último entre as regras financeiras
     // porque o sinal é genérico o bastante pra não competir com boleto_rateio_unidade/recibo_cartorio, que
     // são mais específicos e já tiveram sua chance antes desta na lista.
+    // Achado 13/ago: "Recebi (emos) de" com o "o" de "emos" lido como "º" pelo OCR ("(EMºS)") não casava
+    // com o "(\(EMOS\))?" literal antigo — a janela livre [\s\S]{0,15}? no lugar do grupo exato tolera
+    // qualquer ruído entre "Recebi/Recebemos" e o "do/de" que vem depois, sem depender do texto exato do
+    // parêntese. Também cobre o título alternativo "RECIBO DE PRESTAÇÃO DE SERVIÇOS" (sem a frase "recebi de"
+    // em lugar nenhum do documento — o condomínio aparece só como "Destinatário:", que os rótulos padrão de
+    // findCondominioFallback já não cobrem, mas o "EDF."/"ED"/etc dentro do valor capturado ainda funciona).
     id: "recibo_generico",
-    test: (norm) => /RECEB(I|EMOS)\s*(\(EMOS\))?\s+(DO|DE)\b/.test(norm),
-    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
+    test: (norm) => /RECEB(I|EMOS)[\s\S]{0,15}?\b(DO|DE)\b/.test(norm) || norm.includes('RECIBO DE PRESTACAO DE SERVICO'),
+    extract: (norm, raw) => {
+      let condominio = resolverCondominio(norm, raw);
+      if (!condominio){
+        const dest = raw.match(/DESTINAT[AÁ]RIO[\s\S]{0,5}?([^\n]+)/i);
+        if (dest) condominio = findCondominio(normalize(dest[1])) || findCondominioFallback(dest[1]);
+      }
+      return { condominio, ...findData(raw) };
+    },
     format: f => `RECIBO${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
     confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
   },
@@ -449,6 +501,18 @@ const DOCUMENT_TYPES = [
     test: (norm) => /TOMADOR\s+DE\s+SERVI[CÇ]OS?/.test(norm),
     extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
     format: f => `NOTA COBRANCA${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
+  },
+  {
+    // DARF (Documento de Arrecadação de Receitas Federais) — guia de recolhimento de tributo federal (INSS/CP
+    // Patronal etc.) emitida pelo sistema SENDA. Achado 13/ago: "Receita Federal" some quase por completo no
+    // OCR ("RECEIÍEI Federal de Receitas Federais"), mas o título "Documento de Arrecadação" sobrevive limpo
+    // — sinal suficiente sozinho. Usa o vencimento (primeira data dd/mm/aaaa que aparece, logo após o CNPJ/
+    // Razão Social) como referência.
+    id: "darf_receita_federal",
+    test: (norm) => norm.includes('DOCUMENTO DE ARRECADACAO'),
+    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
+    format: f => `DARF${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
     confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
   },
   {
@@ -581,8 +645,11 @@ function findCondominio(text){
 }
 
 // Fim de captura do nome do condomínio no cabeçalho: quebra de linha, 2+ espaços, número isolado (quase
-// sempre apartamento/telefone/código vazando da linha seguinte), fim de string, ou pontuação de corte.
-const FIM_NOME_CONDOMINIO = '(?:[\\n\\r]|\\s{2,}|\\s\\d|$|\\.|,|-|—)';
+// sempre apartamento/telefone/código vazando da linha seguinte), espaço seguido de símbolo de ruído de OCR
+// (achado 13/ago: um "*" solto do formulário bancário grudava a captura, impedindo o "\n" seguinte de ser
+// alcançado porque "*" não é letra/espaço/dígito e travava o character class do grupo de captura antes de
+// chegar lá), fim de string, ou pontuação de corte.
+const FIM_NOME_CONDOMINIO = '(?:[\\n\\r]|\\s{2,}|\\s\\d|\\s[^A-Za-zÀ-ÖØ-öø-ÿ0-9\\s]|$|\\.|,|-|—)';
 
 // Lista de rótulos que costumam preceder o nome do condomínio no cabeçalho do documento — da forma mais
 // específica/confiável pra mais curta/ambígua. A ordem importa: um rótulo curto ("ED", "CON") só é tentado
