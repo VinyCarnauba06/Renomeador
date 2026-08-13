@@ -62,7 +62,7 @@ const MIN_TEXT_LEN_TO_SKIP_OCR = 20; // se o PDF já tiver texto pesquisável co
 // condomínio já batia 0.75 e virava "✓ ALTA CONFIANÇA" sem chance de correção), o documento é o dado mais
 // importante do nome do arquivo pra esse fluxo — por isso fica de fora do cálculo de score e vira um corte
 // duro em identifyDocument().
-const RULES_SEM_CONDOMINIO = new Set(['reservas_fim_de_semana', 'protocolo_entrega_boletos']);
+const RULES_SEM_CONDOMINIO = new Set(['reservas_fim_de_semana', 'protocolo_entrega_boletos', 'comprovante_pagamento_consumo_sicredi']);
 
 /* ============================================================
    TIPOS DE DOCUMENTO — regras de negócio aprendidas dos exemplos reais
@@ -415,6 +415,21 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
   },
   {
+    // Informativo mensal de aplicação CDB (Caixa) — extrato de rendimento de investimento do condomínio.
+    // Usa o mês/ano de referência impresso no topo (coluna "Mês"), igual ao recibo_pagamento_salario.
+    id: "informativo_cdb_caixa",
+    test: (norm) => norm.includes('INFORMATIVO MENSAL') && norm.includes('CDB'),
+    extract: (norm, raw) => {
+      const condominio = resolverCondominio(norm, raw);
+      const comp = normalize(raw).match(/\b([A-Z]+)\/(\d{4})\b/);
+      const mes = comp && MESES[comp[1]] ? MESES[comp[1]] : null;
+      const ano = comp ? comp[2] : null;
+      return { condominio, mes, ano };
+    },
+    format: f => `INFORMATIVO CDB${f.condominio ? ' ' + f.condominio : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
+  },
+  {
     // Recibo de cartório — usa a data por extenso do rodapé ("Maceió - AL, ..., DD de MÊS de AAAA").
     id: "recibo_cartorio",
     test: (norm) => /CART[OÓ]RIO/.test(norm) && /RECIBO/.test(norm),
@@ -507,6 +522,49 @@ const DOCUMENT_TYPES = [
     confidence: f => (f.condominio ? 0.4 : 0.1) + (f.categoria ? 0.2 : 0) + (f.dataDDMM ? 0.3 : 0) + 0.1
   },
   {
+    // Relatório "Despesas Diversas" (variante do relatorio_despesas_prolar, título diferente e sem
+    // Grupo/Classe — achado 13/ago). O condomínio aparece direto como "CONDOMINIO X" logo abaixo do título.
+    id: "relatorio_despesas_diversas",
+    test: (norm) => norm.includes('RELATORIO DE DESPESAS DIVERSAS'),
+    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
+    format: f => `RELATORIO DESPESAS${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
+  },
+  {
+    // Recibo de pagamento de salário (folha de pagamento de funcionário do condomínio — porteiro, zelador
+    // etc., sistema "Group Software"). Usa o mês/ano de competência impresso no topo (ex.: "JANEIRO/2026"),
+    // não a data de admissão nem a de pagamento em si — é a referência que mais importa pro arquivo. O nome
+    // do condomínio vem do campo "Departamento:", que às vezes cola direto no rótulo seguinte ("Seção:") sem
+    // pontuação — por isso o corte de " SEÇÃO"/" SECAO" residual abaixo, além do fix geral de FIM_NOME_CONDOMINIO.
+    id: "recibo_pagamento_salario",
+    test: (norm) => norm.includes('RECIBO DE PAGAMENTO') && (norm.includes('SALARIO') || norm.includes('FUNCIONARIO')),
+    extract: (norm, raw) => {
+      let condominio = resolverCondominio(norm, raw);
+      if (condominio) condominio = condominio.replace(/\s+SE[CÇ][AÃ]O$/i, '').trim();
+      const comp = normalize(raw).match(/\b([A-Z]+)\/(\d{4})\b/);
+      const mes = comp && MESES[comp[1]] ? MESES[comp[1]] : null;
+      const ano = comp ? comp[2] : null;
+      return { condominio, mes, ano };
+    },
+    format: f => `RECIBO PAGAMENTO${f.condominio ? ' ' + f.condominio : ''}${f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : ''}`,
+    confidence: f => (f.condominio ? 0.5 : 0.15) + (f.mes && f.ano ? 0.4 : 0)
+  },
+  {
+    // Comprovante Sicredi de "Pagamento de Contas de Consumo" (água/luz/etc. de terceiro pago via convênio) —
+    // achado 13/ago numa conta da BRK Ambiental. Este layout nunca imprime o nome do condomínio (só dados da
+    // empresa conveniada e do convênio bancário), então fica em RULES_SEM_CONDOMINIO — tipo+empresa+data já
+    // bastam pra um nome útil, exigir condomínio aqui derrubaria toda vez à toa.
+    id: "comprovante_pagamento_consumo_sicredi",
+    test: (norm) => norm.includes('PAGAMENTO DE CONTAS DE CONSUMO'),
+    extract: (norm, raw) => {
+      const empresaM = raw.match(/NOME:\s*([^\n]+)/i);
+      const empresa = empresaM ? empresaM[1].split(/[-–—]/)[0].trim() : null;
+      return { empresa, ...findData(raw) };
+    },
+    format: f => `COMPROVANTE PAGAMENTO${f.empresa ? ' ' + f.empresa.toUpperCase() : ''}${f.dataDDMM ? ' ' + f.dataDDMM : ''}`,
+    confidence: f => (f.empresa ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
+  },
+  {
     // Recibo avulso sem layout formal de boleto/cartório — prestadores pequenos (dedetização, extintor,
     // retirada de entulho) e recibos "Recebi(emos) de" do sistema PRO-LAR. Sinal: frase "RECEBI(EMOS)
     // DO/DE ..." — não depende da palavra "RECIBO" aparecer (vários exemplos reais do lote de 91 nem
@@ -519,8 +577,12 @@ const DOCUMENT_TYPES = [
     // parêntese. Também cobre o título alternativo "RECIBO DE PRESTAÇÃO DE SERVIÇOS" (sem a frase "recebi de"
     // em lugar nenhum do documento — o condomínio aparece só como "Destinatário:", que os rótulos padrão de
     // findCondominioFallback já não cobrem, mas o "EDF."/"ED"/etc dentro do valor capturado ainda funciona).
+    // Terceiro gatilho (13/ago): recibo/vale de ressarcimento avulso ("A quantia/importância de R$ X...
+    // referente a...") — modelo antigo de recibo escrito à mão ou em formulário simples, sem "recebi(emos)"
+    // nem título "RECIBO" impresso. Achado num vale de ressarcimento de material hidráulico.
     id: "recibo_generico",
-    test: (norm) => /RECEB(I|EMOS)[\s\S]{0,15}?\b(DO|DE)\b/.test(norm) || norm.includes('RECIBO DE PRESTACAO DE SERVICO'),
+    test: (norm) => /RECEB(I|EMOS)[\s\S]{0,15}?\b(DO|DE)\b/.test(norm) || norm.includes('RECIBO DE PRESTACAO DE SERVICO')
+      || /A\s+IMPORT[AÂ]NCIA\s+DE/.test(norm),
     extract: (norm, raw) => {
       let condominio = resolverCondominio(norm, raw);
       if (!condominio){
@@ -569,11 +631,22 @@ const DOCUMENT_TYPES = [
     // boleto_rateio_unidade só que sem coluna de "Unidade" (não é rateio por lote). Achado com OCR bem ruim,
     // onde BENEFICIÁRIO/PAGADOR/VENCIMENTO saíram todos garbled ("Bulmnlw'lliº", "Fºam", "Vena/manto") mas o
     // título "Reclbo do Pagador"/"Recibo de Pagador" sobrevive (só a vogal do meio de "Recibo" varia: i↔l).
+    // Quarto sinal (13/ago): fatura gerada por plataforma de cobrança tipo Asaas ("Olá, {condomínio} / Aqui
+    // está seu boleto." + "Como realizar o pagamento:" + "Linha digitável") — nem tem BENEFICIÁRIO/PAGADOR
+    // impressos, é um layout totalmente diferente (mensagem personalizada + linha digitável + QR code). A
+    // linha "Olá, {condomínio}" é extraída primeiro porque é mais confiável que a busca genérica por rótulo
+    // aqui (o nome vem sem nenhum rótulo tipo "CONDOMÍNIO"/"EDIFÍCIO" na frente sempre, só depois de "Olá,").
     id: "boleto_bancario_generico",
     test: (norm) => /PAG[AÁ]VEL\s+PREFERENCIALMENTE/.test(norm) || semEspacos(norm).includes('PAGAVELPREFERENCIALMENTE')
       || (norm.includes('BENEFICIARIO') && norm.includes('PAGADOR') && norm.includes('VENCIMENTO'))
-      || /REC[IL]BO\s+D[OE]\s+PAGADOR/.test(norm),
-    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw), ...findData(raw) }),
+      || /REC[IL]BO\s+D[OE]\s+(PAGADOR|SACADO)/.test(norm)
+      || (norm.includes('COMO REALIZAR O PAGAMENTO') && norm.includes('LINHA DIGITAVEL')),
+    extract: (norm, raw) => {
+      const ola = raw.match(/OL[AÁ],?\s*([^\n]+)/i);
+      let condominio = ola ? (findCondominio(normalize(ola[1])) || findCondominioFallback(ola[1])) : null;
+      if (!condominio) condominio = resolverCondominio(norm, raw);
+      return { condominio, ...findData(raw) };
+    },
     format: f => `BOLETO${f.condominio ? ' ' + f.condominio : ''}${f.dataDDMM ? ' ' + f.dataDDMM : (f.mes && f.ano ? ' ' + f.mes + ' ' + f.ano : '')}`,
     confidence: f => (f.condominio ? 0.5 : 0.15) + ((f.dataDDMM || (f.mes && f.ano)) ? 0.4 : 0)
   },
@@ -629,6 +702,7 @@ function findTipoGenerico(text){
   const semAutorizacao = text.replace(/PROTOCOLO\s+DE\s+AUTORIZA[CÇ][AÃ]O/g, '');
   if (semAutorizacao.includes("PROTOCOLO")) return "PROTOCOLO";
   if (text.includes("TERMO")) return "TERMO";
+  if (text.includes("CONTAS A RECEBER")) return "CONTAS A RECEBER";
   return null;
 }
 
@@ -695,7 +769,10 @@ function findCondominio(text){
 // (achado 13/ago: um "*" solto do formulário bancário grudava a captura, impedindo o "\n" seguinte de ser
 // alcançado porque "*" não é letra/espaço/dígito e travava o character class do grupo de captura antes de
 // chegar lá), fim de string, ou pontuação de corte.
-const FIM_NOME_CONDOMINIO = '(?:[\\n\\r]|\\s{2,}|\\s\\d|\\s[^A-Za-zÀ-ÖØ-öø-ÿ0-9\\s]|$|\\.|,|-|—)';
+// ":" solto (sem espaço antes, ex.: "Seção:" colado no rótulo seguinte) também corta — achado 13/ago num
+// recibo de pagamento de salário: "Departamento: CONDOMINIO CERRO CATEDRAL Seção: PORTEIRO..." só tinha um
+// espaço simples entre o nome e o próximo rótulo, sem símbolo/dígito ali pra disparar as alternativas acima.
+const FIM_NOME_CONDOMINIO = '(?:[\\n\\r]|\\s{2,}|\\s\\d|\\s[^A-Za-zÀ-ÖØ-öø-ÿ0-9\\s]|:|$|\\.|,|-|—)';
 
 // Lista de rótulos que costumam preceder o nome do condomínio no cabeçalho do documento — da forma mais
 // específica/confiável pra mais curta/ambígua. A ordem importa: um rótulo curto ("ED", "CON") só é tentado
@@ -774,16 +851,18 @@ function resolverCondominio(norm, raw){
 function findData(rawText){
   // dd/mm/aaaa ou dd-mm-aaaa ou dd.mm.aaaa
   let m = rawText.match(/\b([0-3]?\d)[\/\-\.]([0-1]?\d)[\/\-\.](\d{4}|\d{2})\b/);
-  if (m){
+  if (m && Number(m[1]) >= 1 && Number(m[1]) <= 31 && Number(m[2]) >= 1 && Number(m[2]) <= 12){
     const dd = m[1].padStart(2,'0');
     const mm = m[2].padStart(2,'0');
     let yyyy = m[3];
     if (yyyy.length === 2) yyyy = '20' + yyyy;
     return { dataDDMM: `${dd}.${mm}`, mes: mesPorNumero(mm), ano: yyyy };
   }
-  // dd/mm sem ano
+  // dd/mm sem ano — dia/mês "00" (achado 13/ago: "0.00" de um valor monetário tipo "R$ 0.00" casando à toa
+  // com esse padrão) é rejeitado aqui e cai pros fallbacks de mês/ano por extenso abaixo, em vez de virar
+  // uma data fantasma "00.00" no nome do arquivo.
   m = rawText.match(/\b([0-3]?\d)[\/\-\.]([0-1]?\d)\b/);
-  if (m){
+  if (m && Number(m[1]) >= 1 && Number(m[1]) <= 31 && Number(m[2]) >= 1 && Number(m[2]) <= 12){
     const dd = m[1].padStart(2,'0');
     const mm = m[2].padStart(2,'0');
     return { dataDDMM: `${dd}.${mm}`, mes: mesPorNumero(mm), ano: null };
