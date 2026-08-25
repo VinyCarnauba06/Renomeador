@@ -56,6 +56,13 @@ const MESES = {
 const CONFIDENCE_THRESHOLD = 0.7; // abaixo disso vira "⚠ CONFERIR" e entra na fila do botão "revisar baixa confiança"
 const MIN_TEXT_LEN_TO_SKIP_OCR = 20; // se o PDF já tiver texto pesquisável com pelo menos isso, não faz OCR
 
+// ==== Extração via IA (backend serverless — a chave da Anthropic nunca fica no navegador) ====
+// DOCUMENT_TYPES/CONDOMINIOS continuam sendo o caminho rápido (grátis, offline, determinístico) pros casos
+// que já aprendemos. A IA entra só quando esse caminho não resolve: PDF só-imagem, condomínio fora da
+// whitelist, tipo de documento nunca visto. Ver identifyDocumentSmart().
+const AI_EXTRACT_ENDPOINT = 'https://renomeador-api.vercel.app/api/extract'; // TROCAR pela URL real após o deploy no Vercel
+const AI_SECRET_STORAGE_KEY = 'renomeador_ai_secret_v1';
+
 // Regras cujo nome final NUNCA leva condomínio por design (ver comentários nas próprias regras em
 // DOCUMENT_TYPES). Para todas as outras, condomínio ausente nunca pode resultar em auto-aceite: mesmo que
 // tipo+data pontuem alto o bastante pra passar de CONFIDENCE_THRESHOLD sozinhos (ex.: "TERMO 08.08" sem
@@ -931,6 +938,113 @@ function identifyDocument(rawText, ocrConfidence){
 }
 
 /* ============================================================
+   EXTRAÇÃO VIA IA (fallback inteligente pra tudo que DOCUMENT_TYPES/CONDOMINIOS não cobre)
+   ============================================================
+   O motor de regras acima é rápido e grátis, mas é fechado: só reconhece os tipos/condomínios que já
+   foram ensinados nele manualmente. Em vez de continuar ampliando regex pra cada caso novo, qualquer
+   documento que o motor de regras não resolver com confiança suficiente é mandado, como imagem, pra um
+   backend serverless que chama a Claude API (visão) e devolve a extração já estruturada — generaliza pra
+   condomínio/tipo de documento nunca visto sem precisar editar código.
+*/
+
+// Pede a chave de acesso do backend uma única vez e guarda em localStorage (nunca é a chave da Anthropic —
+// é só um segredo compartilhado entre este front-end e o proxy serverless, pra evitar uso por terceiros).
+function getAiSecret(){
+  let secret = localStorage.getItem(AI_SECRET_STORAGE_KEY);
+  if (!secret){
+    secret = window.prompt('Cole a chave de acesso do backend de IA:');
+    if (secret) localStorage.setItem(AI_SECRET_STORAGE_KEY, secret.trim());
+  }
+  return secret ? secret.trim() : null;
+}
+
+function canvasToBase64Jpeg(canvas, quality){
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (!blob) return reject(new Error('canvas_to_blob_failed'));
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(String(reader.result).split(',')[1]);
+      reader.onerror = () => reject(reader.error || new Error('file_reader_failed'));
+      reader.readAsDataURL(blob);
+    }, 'image/jpeg', quality || 0.85);
+  });
+}
+
+// Chama o proxy serverless (api/extract.js) com a página renderizada como imagem. Lança erro em qualquer
+// falha (sem chave, sem rede, backend fora do ar) — quem chama decide o fallback (ver identifyDocumentSmart).
+async function extractWithAI(canvas, { hint } = {}){
+  const secret = getAiSecret();
+  if (!secret) throw new Error('ai_secret_not_configured');
+  const image = await canvasToBase64Jpeg(canvas, 0.85);
+  const res = await fetch(AI_EXTRACT_ENDPOINT, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-renomeador-secret': secret },
+    body: JSON.stringify({ image, mimeType: 'image/jpeg', hint }),
+  });
+  if (res.status === 401){
+    // chave errada/expirada — some com ela pra não insistir com a mesma chave em todos os próximos arquivos
+    localStorage.removeItem(AI_SECRET_STORAGE_KEY);
+    throw new Error('ai_unauthorized');
+  }
+  if (!res.ok) throw new Error(`ai_http_${res.status}`);
+  return res.json();
+}
+
+// Orquestrador principal: tenta o motor de regras local (grátis, instantâneo) primeiro; só recorre à IA
+// quando o texto nativo não existe/não basta ou o motor de regras não reconheceu nada com confiança
+// suficiente; se a IA falhar (rede, sem chave), cai pro pipeline antigo de OCR local + regras como último
+// recurso, pra o app nunca ficar completamente sem funcionar.
+async function identifyDocumentSmart(file){
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let nativeText = '';
+  const maxPages = Math.min(pdf.numPages, 3);
+  for (let i = 1; i <= maxPages; i++){
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    nativeText += content.items.map(it => it.str).join(' ') + '\n';
+  }
+  const hasNativeText = nativeText.trim().length >= MIN_TEXT_LEN_TO_SKIP_OCR;
+
+  if (hasNativeText){
+    const local = identifyDocument(nativeText, null);
+    if (local.nome && local.confidence >= CONFIDENCE_THRESHOLD){
+      return { ...local, text: nativeText, usedOCR: false, usedAI: false };
+    }
+  }
+
+  try {
+    const page1 = await pdf.getPage(1);
+    const canvas = await renderPageToCanvas(page1, 2.5);
+    const ai = await extractWithAI(canvas);
+    canvas.remove();
+    if (ai && ai.nome_sugerido){
+      return {
+        nome: ai.nome_sugerido,
+        confidence: typeof ai.confidence === 'number' ? ai.confidence : 0.85,
+        ruleId: 'ai:' + (ai.tipo_documento || 'desconhecido'),
+        fields: {
+          ...findExtras(nativeText),
+          condominio: ai.condominio || undefined,
+          data: ai.data || undefined,
+          unidade: ai.unidade || undefined,
+          categoria: ai.categoria || undefined,
+        },
+        text: nativeText.trim() || '[PDF só-imagem — extraído via IA]',
+        usedOCR: false,
+        usedAI: true,
+      };
+    }
+  } catch (err){
+    console.warn('Extração via IA falhou, caindo pro OCR local:', err);
+  }
+
+  const { text, ocrConfidence, usedOCR, rotationUsed } = await extractPdfText(file);
+  const result = identifyDocument(text, ocrConfidence);
+  return { ...result, text, usedOCR, usedAI: false, rotationUsed };
+}
+
+/* ============================================================
    LEITURA DE PDF: TEXTO NATIVO -> OCR (fallback, com correção de rotação)
    ============================================================
    Os documentos reais analisados eram todos PDFs só-imagem (sem texto
@@ -1123,11 +1237,39 @@ async function ocrDeepReview(canvas0){
 
 // Roda a revisão profunda para UM documento e devolve o resultado atualizado (ou null se não deu pra melhorar).
 async function reviewDocument(row){
-  if (!row.usedOCR){
-    // Texto nativo (não veio de OCR) — o texto já é o que é; revisar de novo não muda nada.
+  if (!row.usedOCR && !row.usedAI){
+    // Texto nativo (não veio de OCR nem de IA) — o texto já é o que é; revisar de novo não muda nada.
     // O que falta aqui é vocabulário (condomínio/tipo não reconhecido), não qualidade de leitura.
     return null;
   }
+
+  // Primeiro tenta de novo via IA, em resolução maior e avisando que é um caso difícil (o modelo tende a
+  // prestar mais atenção em rotação/campos ambíguos com essa dica). Só cai pro OCR profundo local se a IA
+  // falhar (sem chave configurada, rede fora, backend indisponível).
+  try {
+    const canvasAI = await renderPreprocessedPage(row.originalFile, 3.5);
+    const ai = await extractWithAI(canvasAI, { hint: 'baixa_confianca_revisar_com_cuidado_inclusive_rotacao_e_condominio' });
+    canvasAI.remove();
+    if (ai && ai.nome_sugerido){
+      const ocrConfidence = typeof ai.confidence === 'number' ? ai.confidence : 0.85;
+      const result = {
+        nome: ai.nome_sugerido,
+        confidence: ocrConfidence,
+        ruleId: 'ai:' + (ai.tipo_documento || 'desconhecido'),
+        fields: {
+          condominio: ai.condominio || undefined,
+          data: ai.data || undefined,
+          unidade: ai.unidade || undefined,
+          categoria: ai.categoria || undefined,
+        },
+      };
+      return { text: row.ocrText, ocrConfidence, result };
+    }
+  } catch (err){
+    console.warn('Revisão via IA falhou, caindo pro OCR profundo local:', err);
+  }
+
+  if (!row.usedOCR) return null; // não veio de OCR local — não há OCR profundo pra tentar como último recurso
   const canvas = await renderPreprocessedPage(row.originalFile, 3.5); // resolução ainda maior na revisão
   const best = await ocrDeepReview(canvas);
   canvas.remove();
@@ -1222,14 +1364,16 @@ async function handleFiles(files){
       renderRow(row);
 
       try {
-        const { text, ocrConfidence, usedOCR, rotationUsed } = await extractPdfText(file);
-        const result = identifyDocument(text, ocrConfidence);
+        const result = await identifyDocumentSmart(file);
         row.fields = result.fields;
         row.ruleId = result.ruleId;
-        row.usedOCR = usedOCR;
-        row.rotationUsed = rotationUsed;
-        row.ocrText = text;
-        row.ocrConfidencePct = ocrConfidence != null ? Math.round(ocrConfidence * 100) : null;
+        row.usedOCR = result.usedOCR;
+        row.usedAI = result.usedAI;
+        row.rotationUsed = result.rotationUsed;
+        row.ocrText = result.text;
+        // Confiança de OCR bruta só existe no pipeline local antigo; no caminho de regras locais com texto
+        // nativo e no caminho de IA, result.confidence já É a confiança final — não há uma métrica separada.
+        row.ocrConfidencePct = result.usedOCR ? Math.round((result.confidence || 0) * 100) : null;
 
         if (result.nome && result.confidence >= CONFIDENCE_THRESHOLD){
           row.suggestedName = uniqueName(result.nome) + '.pdf';
@@ -1381,7 +1525,7 @@ function renderRow(row){
 
   const origCell = row.merged
     ? `<div class="orig">Unido de:<br>${row.mergedFrom.map(n => escapeHtml(n)).join('<br>')}</div>`
-    : `<div class="orig">${escapeHtml(row.originalName)}</div>${row.usedOCR ? `<div class="status">via OCR${row.rotationUsed ? ' · girado '+row.rotationUsed+'°' : ''}${row.ocrConfidencePct != null ? ' · conf. '+row.ocrConfidencePct+'%' : ''}${row.reviewed ? ' · revisado' : ''}</div>` : ''}`;
+    : `<div class="orig">${escapeHtml(row.originalName)}</div>${row.usedOCR ? `<div class="status">via OCR${row.rotationUsed ? ' · girado '+row.rotationUsed+'°' : ''}${row.ocrConfidencePct != null ? ' · conf. '+row.ocrConfidencePct+'%' : ''}${row.reviewed ? ' · revisado' : ''}</div>` : row.usedAI ? `<div class="status">via IA${row.reviewed ? ' · revisado' : ''}</div>` : ''}`;
 
   const podeSelecionarParaJuncao = row.status !== 'processing';
   const checkboxCell = podeSelecionarParaJuncao
@@ -1633,9 +1777,10 @@ async function mergeSelectedPdfs(){
 mergeConfirmBtn.addEventListener('click', mergeSelectedPdfs);
 
 function reviewableRows(){
-  // Só documentos que passaram por OCR, ficaram abaixo do limiar de confiança e ainda não foram revisados
-  // (a revisão é determinística — rodar de novo no mesmo arquivo dá o mesmo resultado, então não repete sozinha).
-  return items.filter(i => i.status !== 'processing' && i.usedOCR && !i.reviewed && (i.status === 'low' || i.status === 'unidentified'));
+  // Documentos que passaram por OCR local OU por IA, ficaram abaixo do limiar de confiança e ainda não
+  // foram revisados (a revisão é determinística o bastante — rodar de novo no mesmo arquivo raramente muda
+  // o resultado sozinha, então não repete automaticamente).
+  return items.filter(i => i.status !== 'processing' && (i.usedOCR || i.usedAI) && !i.reviewed && (i.status === 'low' || i.status === 'unidentified'));
 }
 
 function updateCount(){

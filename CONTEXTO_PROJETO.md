@@ -3,23 +3,36 @@
 > Cole este arquivo (ou peça pra Claude ler `C:\Dev\Renomeador\CONTEXTO_PROJETO.md`) no início do próximo chat pra retomar de onde parou.
 
 ## O que é
-App client-side (PDF.js + Tesseract.js + JSZip + pdf-lib) que lê PDFs digitalizados de condomínio (OCR) e sugere nome de arquivo padronizado via engine de regras. Deploy: GitHub Pages (`https://vinycarnauba06.github.io/Renomeador/`). 100% no navegador — nada sai da máquina do usuário. **Restrição dura: sem backend, sem servidor, grátis.**
+App client-side (PDF.js + Tesseract.js + JSZip + pdf-lib) que lê PDFs digitalizados de condomínio e sugere nome de arquivo padronizado. Deploy do front: GitHub Pages (`https://vinycarnauba06.github.io/Renomeador/`).
+
+**Mudança de arquitetura (25/ago):** a restrição "sem backend" foi abandonada de propósito. Motor de regras (`DOCUMENT_TYPES`/`CONDOMINIOS`) era fechado — só reconhecia o que já tinha sido ensinado manualmente (whitelist de condomínios Prolar, tipos de documento pré-cadastrados). Qualquer coisa fora disso, mesmo com OCR perfeito, caía em "não identificado". Em vez de continuar ampliando regex pra sempre, foi adicionado um backend serverless (Vercel, `api/extract.js`) que faz proxy autenticado pra Claude API (visão): documentos que o motor de regras local não resolver são mandados como imagem pro backend e voltam já com tipo/condomínio/data/nome sugerido extraídos por IA, sem precisar de regra pré-cadastrada.
 
 ## Arquitetura
 - `index.html` — carrega libs via CDN (cdnjs) + `script.js`.
 - `style.css`
-- `script.js` — tudo:
-  - `CONDOMINIOS`: whitelist de ~30 condomínios (nome + aliases).
-  - `DOCUMENT_TYPES`: array ordenado de detectores `{id, test, extract, format, confidence}` — primeiro que casar decide o nome. Mais específico primeiro.
-  - `CONDOMINIO_LABELS` + `regexDoRotulo()`: extração data-driven do nome do condomínio a partir de rótulos no cabeçalho (CONDOMÍNIO, EDIFÍCIO, EDF, ED, RES, RESIDENCIAL, COND, CON etc., com/sem acento, com/sem ponto).
-  - `identifyDocument()`: roda os detectores, aplica penalidade por confiança de OCR, e um corte duro (`RULES_SEM_CONDOMINIO`) que impede auto-aceite sem condomínio resolvido.
-  - Pipeline de OCR: texto nativo primeiro → senão renderiza pág. 1 (PDF.js canvas), pré-processa (grayscale + contraste), testa rotações 0/90/180/270 com Tesseract, `ocrQualityScore()` escolhe a melhor.
-  - Botão "revisar baixa confiança": reprocessa em resolução maior (3.5) testando 3 PSM × 4 rotações.
-  - Feature de junção de PDFs: checkbox por linha → fila reordenável → `mergeSelectedPdfs()` via pdf-lib.
-  - Marcador `UI / ORQUESTRAÇÃO` no arquivo separa lógica pura (testável em Node) do DOM.
+- `script.js` — tudo do front:
+  - `CONDOMINIOS`: whitelist de ~30 condomínios (nome + aliases) — atalho de alta confiança pro caminho local, não é mais o único jeito de reconhecer condomínio (a IA reconhece qualquer um pelo conteúdo).
+  - `DOCUMENT_TYPES`: array ordenado de detectores `{id, test, extract, format, confidence}` — primeiro que casar decide o nome. Continua sendo o caminho RÁPIDO/GRÁTIS/OFFLINE pros casos já ensinados.
+  - `identifyDocument()`: motor de regras local original — roda os detectores, aplica penalidade por confiança de OCR, corte duro (`RULES_SEM_CONDOMINIO`) sem condomínio resolvido. Inalterado.
+  - `identifyDocumentSmart(file)` (NOVO): orquestrador principal, chamado no lugar de `extractPdfText`+`identifyDocument` direto. Ordem: (1) texto nativo do PDF + `identifyDocument()` local — se confiança >= `CONFIDENCE_THRESHOLD`, retorna na hora, sem rede; (2) senão, renderiza pág. 1 em canvas e chama `extractWithAI()` — o backend devolve JSON já formatado (`nome_sugerido`, `condominio`, `confidence`, etc.); (3) se a IA falhar (sem chave, sem rede, backend fora do ar), cai pro pipeline antigo de OCR local (Tesseract) + `identifyDocument()`, como último recurso pra nunca deixar o app 100% sem funcionar.
+  - `extractWithAI(canvas, {hint})` / `getAiSecret()` / `canvasToBase64Jpeg()`: cliente HTTP pro backend. A "chave" pedida ao usuário (`localStorage`, prompt na primeira vez) é só o segredo compartilhado do backend (`RENOMEADOR_SHARED_SECRET`), NUNCA a chave da Anthropic.
+  - Pipeline de OCR local (Tesseract) continua existindo intacto — vira fallback de rede indisponível, não é mais o caminho principal pra PDF só-imagem.
+  - Botão "revisar baixa confiança" (`reviewDocument`): agora tenta IA em resolução maior (3.5) com uma dica de contexto primeiro; só cai pro `ocrDeepReview` (3 PSM × 4 rotações local) se a IA falhar.
+  - Feature de junção de PDFs: checkbox por linha → fila reordenável → `mergeSelectedPdfs()` via pdf-lib. Inalterado.
+  - Marcador `UI / ORQUESTRAÇÃO` no arquivo separa lógica pura (testável em Node) do DOM. Inalterado.
+- `api/extract.js` (NOVO) — função serverless Vercel. Recebe `{ image (base64), mimeType, hint? }`, valida `X-Renomeador-Secret` contra `RENOMEADOR_SHARED_SECRET`, chama `POST https://api.anthropic.com/v1/messages` (modelo `claude-haiku-4-5-20251001`, vision) com a chave `ANTHROPIC_API_KEY` (env var, nunca exposta), parseia o JSON da resposta e devolve pro front. CORS restrito a `ALLOWED_ORIGINS` (github.io do Viny + localhost pra dev).
+- `package.json` / `.env.example` / `.gitignore` (NOVOS) — infra mínima pro deploy Vercel.
 
-## Regra de ouro de engenharia deste projeto
-O gargalo NUNCA foi qualidade de OCR (confiança média ~70%+ em lotes reais) — é cobertura de regras/padrões em `DOCUMENT_TYPES` e nos rótulos de condomínio. Toda vez que aparece um "não identificado", o caminho é: extrair o texto OCR real do PDF, achar o padrão que falhou, e ou (a) ampliar um `test()` existente, ou (b) criar um novo tipo em `DOCUMENT_TYPES`.
+## Deploy do backend (pendente — Viny precisa fazer manualmente)
+1. `npm i -g vercel` (se ainda não tiver) e `vercel login`.
+2. Na pasta do projeto: `vercel` (primeira vez, cria o projeto) → depois `vercel --prod`.
+3. No dashboard do Vercel (Project Settings → Environment Variables), configurar `ANTHROPIC_API_KEY` e `RENOMEADOR_SHARED_SECRET` (gerar com `openssl rand -hex 32`) — ver `.env.example`.
+4. Copiar a URL de produção que o Vercel gerar (ex.: `https://renomeador-api.vercel.app`) e colar em `AI_EXTRACT_ENDPOINT`, no topo de `script.js` (hoje está com um placeholder).
+5. Adicionar essa mesma URL de produção em `ALLOWED_ORIGINS` só se o domínio do front mudar — hoje já cobre `https://vinycarnauba06.github.io`.
+6. Abrir o app, colar o valor de `RENOMEADOR_SHARED_SECRET` quando ele pedir "chave de acesso do backend de IA" (fica salvo no `localStorage`, só precisa colar uma vez por navegador).
+
+## Regra de ouro de engenharia deste projeto (revisada)
+Antes: "o gargalo nunca foi OCR, é cobertura de regras". Isso ainda vale pro caminho local (Tier 1), mas agora não é mais o teto do sistema — o que ele não cobrir vai pra IA (Tier 2), que generaliza sem precisar de regra nova por tipo/condomínio. Ainda assim, se um padrão aparecer com muita frequência, vale a pena promovê-lo pra `DOCUMENT_TYPES`: é mais rápido, roda offline e não gasta chamada de API.
 
 ## ⚠️ Regra que não pode ser quebrada
 **Nunca rodar `git` (nem `git status` read-only) via Bash contra `C:\Dev\Renomeador`.** Isso já travou o repositório do usuário com `.git/index.lock` várias vezes (pasta montada não permite deletar o lock via ferramentas). Toda operação git é só instrução em texto pro usuário rodar no PowerShell dele. Editar arquivos: sempre via Read/Edit direto no path do Windows.

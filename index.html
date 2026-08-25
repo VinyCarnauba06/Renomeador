@@ -23,7 +23,7 @@
 
   <div id="drop">
     <div class="big">Arraste os PDFs para esta área</div>
-    <div class="small">ou clique para selecionar arquivos — processamento 100% local, nada é enviado à internet</div>
+    <div class="small">ou clique para selecionar arquivos — leitura do PDF é local; documentos não reconhecidos pelas regras são enviados (só a imagem da página) pra um backend de IA</div>
     <input type="file" id="fileInput" accept="application/pdf" multiple>
   </div>
 
@@ -83,7 +83,7 @@
     </div>
   </div>
 
-  <div class="rulehint">As regras de nomenclatura ficam em <code>DOCUMENT_TYPES</code> e <code>CONDOMINIOS</code>, no início do script — edite/adicione ali conforme surgirem novos tipos de documento ou condomínios.</div>
+  <div class="rulehint">As regras de nomenclatura ficam em <code>DOCUMENT_TYPES</code> e <code>CONDOMINIOS</code>, no início do script — edite/adicione ali conforme surgirem novos tipos de documento ou condomínios. O que essas regras não reconhecerem cai automaticamente pra extração via IA.</div>
 </div>
 
 <script src="script.js"></script>
