@@ -150,6 +150,11 @@ async function handler(req, res) {
 
     if (!aiRes.ok) {
       const detail = await aiRes.text().catch(() => '');
+      if (aiRes.status === 429) {
+        const retryAfter = aiRes.headers.get('retry-after');
+        if (retryAfter) res.setHeader('Retry-After', retryAfter);
+        return res.status(429).json({ error: 'ai_rate_limited', detail });
+      }
       return res.status(502).json({ error: 'ai_upstream_error', status: aiRes.status, detail });
     }
 

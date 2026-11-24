@@ -56,7 +56,10 @@
   </div>
 
   <div id="progressWrap">
-    <div id="progressLabel">Processando...</div>
+    <div class="progressHeader">
+      <div id="progressLabel">Processando...</div>
+      <button id="cancelBatchBtn" type="button" class="secondary dangerBtn" style="display:none">PARAR LOTE</button>
+    </div>
     <div id="progressBar"><div id="progressFill"></div></div>
   </div>
 
@@ -66,7 +69,10 @@
     <div class="filterTabs">
       <button type="button" class="secondary filterBtn active" data-filter="all">Todos (<span id="countAll">0</span>)</button>
       <button type="button" class="secondary filterBtn" data-filter="pending">Pendentes (<span id="countPending">0</span>)</button>
-      <button type="button" class="secondary filterBtn" data-filter="ok">Prontos (<span id="countOk">0</span>)</button>
+      <button type="button" class="secondary filterBtn" data-filter="low">⚠ Conferir (<span id="countLow">0</span>)</button>
+      <button type="button" class="secondary filterBtn" data-filter="unidentified">⚠ Não identificados (<span id="countUnidentified">0</span>)</button>
+      <button type="button" class="secondary filterBtn" data-filter="error">✕ Erros (<span id="countError">0</span>)</button>
+      <button type="button" class="secondary filterBtn" data-filter="ok">✓ Prontos (<span id="countOk">0</span>)</button>
     </div>
     <input type="search" id="searchInput" class="searchInput" placeholder="Filtrar por nome ou condomínio...">
   </div>

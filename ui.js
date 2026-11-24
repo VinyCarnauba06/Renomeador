@@ -23,6 +23,7 @@ import {
   setAiEnabled,
   isAiReady,
 } from './ai-extraction.js';
+import { getOcrConcurrency } from './ocr-pipeline.js';
 import {
   items,
   mergeQueueIds,
@@ -41,10 +42,14 @@ const loteCondominioSelect = document.getElementById('loteCondominioSelect');
 const progressWrap = document.getElementById('progressWrap');
 const progressLabel = document.getElementById('progressLabel');
 const progressFill = document.getElementById('progressFill');
+const cancelBatchBtn = document.getElementById('cancelBatchBtn');
 const filterBar = document.getElementById('filterBar');
 const searchInput = document.getElementById('searchInput');
 const countAllEl = document.getElementById('countAll');
 const countPendingEl = document.getElementById('countPending');
+const countLowEl = document.getElementById('countLow');
+const countUnidentifiedEl = document.getElementById('countUnidentified');
+const countErrorEl = document.getElementById('countError');
 const countOkEl = document.getElementById('countOk');
 const resultsTable = document.getElementById('resultsTable');
 const resultsBody = document.getElementById('resultsBody');
@@ -80,6 +85,21 @@ setLoteHintProvider(() => loteCondominioSelect && loteCondominioSelect.value);
 
 let activeFilter = 'all';
 let currentPreviewUrl = null;
+let isBatchRunning = false;
+let cancelRequested = false;
+
+window.addEventListener('beforeunload', e => {
+  if (isBatchRunning || items.length > 0){
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+cancelBatchBtn.addEventListener('click', () => {
+  cancelRequested = true;
+  cancelBatchBtn.disabled = true;
+  cancelBatchBtn.textContent = 'PARANDO...';
+});
 
 initPdfMerge({
   onMerged: novaLinha => {
@@ -231,58 +251,85 @@ async function handleFiles(files){
   actionsBar.style.display = 'flex';
   progressWrap.style.display = 'block';
 
+  isBatchRunning = true;
+  cancelRequested = false;
+  cancelBatchBtn.style.display = 'inline-block';
+  cancelBatchBtn.disabled = false;
+  cancelBatchBtn.textContent = 'PARAR LOTE';
+
   let done = 0;
   const total = files.length;
   const totalBlocos = Math.ceil(total / TAMANHO_LOTE_INTERNO);
   updateProgress(done, total, 1, totalBlocos);
 
-  for (let bloco = 0; bloco < totalBlocos; bloco++){
-    const inicio = bloco * TAMANHO_LOTE_INTERNO;
-    const arquivosDoBloco = files.slice(inicio, inicio + TAMANHO_LOTE_INTERNO);
+  try {
+    for (let bloco = 0; bloco < totalBlocos; bloco++){
+      if (cancelRequested) break;
+      const inicio = bloco * TAMANHO_LOTE_INTERNO;
+      const arquivosDoBloco = files.slice(inicio, inicio + TAMANHO_LOTE_INTERNO);
 
-    const rowsDoBloco = arquivosDoBloco.map(file => {
-      const id = 'f' + Math.random().toString(36).slice(2);
-      const row = {
-        id,
-        originalFile: file,
-        originalName: file.name,
-        suggestedName: null,
-        confidence: 0,
-        fields: {},
-        status: 'processing',
-        error: null,
-      };
-      items.push(row);
-      renderRow(row);
-      return row;
-    });
+      const rowsDoBloco = arquivosDoBloco.map(file => {
+        const id = 'f' + Math.random().toString(36).slice(2);
+        const row = {
+          id,
+          originalFile: file,
+          originalName: file.name,
+          suggestedName: null,
+          confidence: 0,
+          fields: {},
+          status: 'processing',
+          error: null,
+        };
+        items.push(row);
+        renderRow(row);
+        return row;
+      });
 
-    // Com IA ativa, roda 3 chamadas em paralelo (ganho de ~3x); no OCR local puro, mantém sequencial (1 worker).
-    const concurrency = isAiReady() ? AI_CONCURRENCY : 1;
-    let nextIdx = 0;
-    const workers = Array.from({ length: Math.min(concurrency, rowsDoBloco.length) }, async () => {
-      while (nextIdx < rowsDoBloco.length){
-        const current = rowsDoBloco[nextIdx++];
-        await processSingleRow(current);
-        done++;
-        updateProgress(done, total, bloco + 1, totalBlocos);
-        renderRow(current);
+      // Com IA ativa, roda 3 chamadas em paralelo; no OCR local, usa o pool paralelo de workers do Tesseract.
+      const concurrency = isAiReady() ? AI_CONCURRENCY : getOcrConcurrency();
+      let nextIdx = 0;
+      const workers = Array.from({ length: Math.min(concurrency, rowsDoBloco.length) }, async () => {
+        while (nextIdx < rowsDoBloco.length && !cancelRequested){
+          const current = rowsDoBloco[nextIdx++];
+          await processSingleRow(current);
+          done++;
+          updateProgress(done, total, bloco + 1, totalBlocos);
+          renderRow(current);
+        }
+      });
+      await Promise.all(workers);
+
+      // Se cancelou no meio do bloco, remove as linhas que nem chegaram a começar.
+      if (cancelRequested){
+        for (const r of rowsDoBloco){
+          if (r.status === 'processing'){
+            removeItemById(r.id);
+            const tr = document.getElementById('row-' + r.id);
+            if (tr) tr.remove();
+          }
+        }
+        break;
       }
-    });
-    await Promise.all(workers);
 
-    reorderTable();
-    applyFilters();
-    if (bloco < totalBlocos - 1){
-      await new Promise(resolve => setTimeout(resolve, 0));
+      reorderTable();
+      applyFilters();
+      if (bloco < totalBlocos - 1){
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
     }
+  } finally {
+    isBatchRunning = false;
+    cancelBatchBtn.style.display = 'none';
   }
 
-  progressLabel.textContent = `Concluído: ${total} documento(s) processado(s).`;
+  progressLabel.textContent = cancelRequested
+    ? `Lote interrompido: ${done} de ${total} documento(s) processado(s).`
+    : `Concluído: ${total} documento(s) processado(s).`;
+  cancelRequested = false;
   reorderTable();
   applyFilters();
   updateCount();
-  updateAiStatusButton(); // reflete se uma chave 401 foi limpa durante o lote
+  updateAiStatusButton();
 }
 
 function updateProgress(done, total, bloco, totalBlocos){
@@ -297,23 +344,34 @@ function updateProgress(done, total, bloco, totalBlocos){
    FILTROS E RENDERIZAÇÃO DA TABELA
    ============================================================ */
 
+function rowMatchesFilter(r, query){
+  const matchesTab =
+    activeFilter === 'all' ||
+    (activeFilter === 'pending' && r.status !== 'ok') ||
+    r.status === activeFilter;
+  if (!matchesTab) return false;
+  if (!query) return true;
+  return [
+    r.originalName,
+    r.suggestedName,
+    r.fields && r.fields.condominio,
+    r.fields && r.fields.tipo,
+  ].some(v => v && String(v).toLowerCase().includes(query));
+}
+
+function applyFilterToRow(r){
+  const tr = document.getElementById('row-' + r.id);
+  if (!tr) return;
+  const query = (searchInput ? searchInput.value : '').trim().toLowerCase();
+  tr.classList.toggle('hiddenRow', !rowMatchesFilter(r, query));
+}
+
 function applyFilters(){
   const query = (searchInput ? searchInput.value : '').trim().toLowerCase();
   for (const r of items){
     const tr = document.getElementById('row-' + r.id);
     if (!tr) continue;
-    const matchesTab =
-      activeFilter === 'all' ||
-      (activeFilter === 'ok' && r.status === 'ok') ||
-      (activeFilter === 'pending' && r.status !== 'ok');
-    const matchesSearch = !query || [
-      r.originalName,
-      r.suggestedName,
-      r.fields && r.fields.condominio,
-      r.fields && r.fields.tipo,
-    ].some(v => v && String(v).toLowerCase().includes(query));
-
-    tr.classList.toggle('hiddenRow', !(matchesTab && matchesSearch));
+    tr.classList.toggle('hiddenRow', !rowMatchesFilter(r, query));
   }
 }
 
@@ -545,7 +603,7 @@ function renderRow(row){
     });
   }
 
-  applyFilters();
+  applyFilterToRow(row);
   updateCount();
 }
 
@@ -606,11 +664,17 @@ function reviewableRows(){
 function updateCount(){
   const total = items.length;
   const okCount = items.filter(i => i.status === 'ok').length;
-  const pendingCount = items.filter(i => i.status !== 'ok').length;
+  const lowCount = items.filter(i => i.status === 'low').length;
+  const unidentifiedCount = items.filter(i => i.status === 'unidentified').length;
+  const errorCount = items.filter(i => i.status === 'error').length;
+  const pendingCount = total - okCount;
   const doneCount = items.filter(i => i.status !== 'processing').length;
 
   countAllEl.textContent = String(total);
   countPendingEl.textContent = String(pendingCount);
+  countLowEl.textContent = String(lowCount);
+  countUnidentifiedEl.textContent = String(unidentifiedCount);
+  countErrorEl.textContent = String(errorCount);
   countOkEl.textContent = String(okCount);
 
   countEl.textContent = `${okCount} pronto(s) · ${pendingCount} pendente(s) (${doneCount}/${total} lidos)`;
@@ -702,7 +766,8 @@ downloadBtn.addEventListener('click', async () => {
       if (row.status === 'processing') continue;
       zip.file(row.suggestedName, row.originalFile);
     }
-    const blob = await zip.generateAsync({ type: 'blob' });
+    // PDFs já são comprimidos: STORE evita desperdiçar CPU tentando recomprimir 400+ arquivos no navegador.
+    const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

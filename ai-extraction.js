@@ -115,34 +115,59 @@ function buildAiResult(ai, nativeText){
   };
 }
 
+const RETRYABLE_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+const MAX_AI_ATTEMPTS = 3;
+
+function sleep(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export async function extractWithAI(canvas, { hint, loteCondominio } = {}){
   const secret = getAiSecret();
   if (!secret) throw new Error('ai_secret_not_configured');
 
   const image = await canvasToBase64Jpeg(canvas, 0.85);
-  const signal = (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
-    ? AbortSignal.timeout(AI_FETCH_TIMEOUT_MS)
-    : undefined;
-
-  const res = await fetch(getAiEndpoint(), {
-    method: 'POST',
-    signal,
-    headers: { 'content-type': 'application/json', 'x-renomeador-secret': secret },
-    body: JSON.stringify({
-      image,
-      mimeType: 'image/jpeg',
-      hint: hint || undefined,
-      loteCondominio: loteCondominio || undefined,
-    }),
+  const payload = JSON.stringify({
+    image,
+    mimeType: 'image/jpeg',
+    hint: hint || undefined,
+    loteCondominio: loteCondominio || undefined,
   });
 
-  if (res.status === 401){
-    // Chave errada/expirada — remove pra não insistir nos próximos arquivos do lote
-    setAiSecret('');
-    throw new Error('ai_unauthorized');
+  let lastError = null;
+  for (let attempt = 1; attempt <= MAX_AI_ATTEMPTS; attempt++){
+    const signal = (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+      ? AbortSignal.timeout(AI_FETCH_TIMEOUT_MS)
+      : undefined;
+
+    const res = await fetch(getAiEndpoint(), {
+      method: 'POST',
+      signal,
+      headers: { 'content-type': 'application/json', 'x-renomeador-secret': secret },
+      body: payload,
+    });
+
+    if (res.status === 401){
+      // Chave errada/expirada — remove pra não insistir nos próximos arquivos do lote
+      setAiSecret('');
+      throw new Error('ai_unauthorized');
+    }
+    if (res.ok) return res.json();
+
+    lastError = new Error(`ai_http_${res.status}`);
+    if (!RETRYABLE_HTTP_STATUSES.has(res.status) || attempt === MAX_AI_ATTEMPTS){
+      throw lastError;
+    }
+
+    // Backoff exponencial com respeito a Retry-After (ex.: rate limit 429 em lotes de 400+ PDFs)
+    const retryAfterSec = Number(res.headers.get('retry-after'));
+    const baseDelay = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+      ? Math.min(retryAfterSec * 1000, 15_000)
+      : 1500 * Math.pow(2, attempt - 1);
+    const jitter = Math.floor(Math.random() * 400);
+    await sleep(baseDelay + jitter);
   }
-  if (!res.ok) throw new Error(`ai_http_${res.status}`);
-  return res.json();
+  throw lastError || new Error('ai_unknown_error');
 }
 
 /* ============================================================
