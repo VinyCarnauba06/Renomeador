@@ -157,19 +157,31 @@ function regexDoRotulo(label){
     const comAcento = palavra.split('').map(ch => acentos[ch] || ch).join('');
     return comAcento + '\\.?';
   });
-  return new RegExp('\\b' + partes.join('\\s+') + '\\s+([A-Za-zÀ-ÖØ-öø-ÿ\'\\s]{2,40}?)' + FIM_NOME_CONDOMINIO, 'i');
+  return new RegExp('\\b' + partes.join('\\s+') + '\\s+([A-Za-zÀ-ÖØ-öø-ÿ\'\\s]{2,40}?)' + FIM_NOME_CONDOMINIO, 'gi');
+}
+
+// Filtra falsos positivos de texto corrido (ex.: "normas de condomínio e sossego", "condomínio poderá",
+// "taxa de condomínio") que nunca são nomes reais de condomínio.
+const CONDOMINIO_INICIO_INVALIDO = /^(E|OU|EM|NO|NA|NOS|NAS|DE|DA|DO|DAS|DOS|COM|SEM|POR|PARA|QUE|QUAL|QUAIS|SE|SERA|PODERA|FICA|ESTA|ESTAO|NAO|AO|AOS|PELO|PELA|COMO|ENTRE|ATE|APOS|ANTES|SOBRE|TODO|TODA|DESTE|DESTA|NESSE|NESSA|CUJO|CUJA)\b/;
+const CONDOMINIO_TERMO_INVALIDO = /\b(SOSSEGO|SILENCIO|REGIMENTO|REGULAMENTO|MULTA|DANOS|PREJUIZO|RESPONSABILIDADE|ASSEMBLEIA|CONVENCAO|TAXA|BOLETO|PAGAMENTO|VENCIMENTO|HORARIO|FESTA|FESTAS|SALAO|RESERVA|VISTORIA|MORADOR|MORADORES|INQUILINO|PROPRIETARIO|SINDICO|ADMINISTRADORA|VALOR|REAIS|ARTIGO|CLAUSULA|LEI|DIREITO|DEVER|LIMPEZA|USO|EVENTO|CONVIDADOS)\b/;
+
+function isValidCondominioCandidate(nome){
+  const norm = normalize(nome || '').trim();
+  if (norm.length < 3) return false;
+  if (CONDOMINIO_INICIO_INVALIDO.test(norm)) return false;
+  if (CONDOMINIO_TERMO_INVALIDO.test(norm)) return false;
+  return true;
 }
 
 // Fallback: quando o condomínio não está na whitelist, tenta extrair do cabeçalho do documento, testando
-// CONDOMINIO_LABELS em ordem até um bater. Cobre "CONDOMÍNIO EDIFÍCIO X", "CONDOMÍNIO DO EDIFÍCIO X",
-// "EDF. X", "COND. X", "Associado: X" etc. — com e sem acento, com e sem ponto de abreviação.
+// CONDOMINIO_LABELS em ordem até um candidato válido bater (usando matchAll pra pular ocorrências em texto corrido).
 export function findCondominioFallback(rawText){
   for (const { label, manterRotuloNoNome } of CONDOMINIO_LABELS){
-    const m = rawText.match(regexDoRotulo(label));
-    if (!m) continue;
-    const nome = m[1].trim();
-    if (!nome) continue;
-    return (manterRotuloNoNome ? manterRotuloNoNome + ' ' + nome : nome).trim().toUpperCase();
+    for (const m of rawText.matchAll(regexDoRotulo(label))){
+      const nome = (m[1] || '').trim();
+      if (!isValidCondominioCandidate(nome)) continue;
+      return (manterRotuloNoNome ? manterRotuloNoNome + ' ' + nome : nome).trim().toUpperCase();
+    }
   }
   return null;
 }

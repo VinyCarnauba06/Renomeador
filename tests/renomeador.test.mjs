@@ -86,9 +86,15 @@ test('rules-engine: findData ignora valor monetário 0.00 e lê datas válidas',
   assert.equal(d2.ano, '2026');
 });
 
-test('rules-engine: findCondominioFallback tolera ruído de OCR (* e :)', () => {
+test('rules-engine: findCondominioFallback tolera ruído de OCR (* e :) e rejeita texto corrido', () => {
   assert.equal(findCondominioFallback('CONDOMÍNIO EDIFÍCIO SOL NASCENTE * 123'), 'SOL NASCENTE');
   assert.equal(findCondominioFallback('Departamento: CONDOMINIO CERRO CATEDRAL Seção: PORTEIRO'), 'CERRO CATEDRAL');
+  // Bug real: "normas de condomínio e sossego" em Termo de Salão de Festas virava "TERMO E SOSSEGO"
+  assert.equal(findCondominioFallback('Respeitar as normas do condomínio e sossego dos moradores.'), null);
+  assert.equal(
+    findCondominioFallback('Respeitar as normas do condomínio e sossego.\nCondomínio Costa Esmeralda\n'),
+    'COSTA ESMERALDA'
+  );
 });
 
 test('rules-engine: detectores principais de DOCUMENT_TYPES', () => {
