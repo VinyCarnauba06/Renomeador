@@ -250,7 +250,7 @@ fileInput.addEventListener('change', e => {
 });
 
 const TAMANHO_LOTE_INTERNO = 30;
-const AI_CONCURRENCY = 3;
+const AI_CONCURRENCY = 4;
 
 async function processSingleRow(row){
   try {

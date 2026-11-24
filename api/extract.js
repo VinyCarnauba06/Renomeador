@@ -1,8 +1,7 @@
 // api/extract.js
-// Proxy serverless (Vercel) entre o front-end estático (GitHub Pages) e a Anthropic API.
-// A chave da Anthropic vive só aqui (env var), nunca no navegador. O front-end se autentica com um
-// segredo compartilhado próprio (RENOMEADOR_SHARED_SECRET) — mais simples que OAuth/login pra um app
-// de uso pessoal, mas evita que qualquer um que ache a URL queime seu crédito de API.
+// Proxy serverless (Vercel) para extração via IA (suporta Gemini Flash e Claude Haiku).
+// As chaves de API vivem só aqui (env vars), nunca no navegador. O front-end (mesma origem no Vercel
+// ou GitHub Pages) se autentica com um segredo compartilhado (RENOMEADOR_SHARED_SECRET).
 
 // CommonJS de propósito — evita depender de "type": "module" no package.json (Vercel detecta sozinho).
 const crypto = require('crypto');
@@ -11,26 +10,27 @@ module.exports = handler;
 module.exports.config = { runtime: 'nodejs' };
 
 const ALLOWED_ORIGINS = new Set([
-  'https://renomeador.carnauba.dev.br', // domínio customizado (CNAME)
+  'https://renomeador.carnauba.dev.br', // domínio customizado (CNAME / Vercel)
   'https://vinycarnauba06.github.io',
-  'http://localhost:3000', // dev local (ex.: `npx serve`)
+  'http://localhost:3000',
   'http://127.0.0.1:3000',
-  'http://localhost:5500', // Live Server
+  'http://localhost:5500',
   'http://127.0.0.1:5500',
   'http://localhost:5173',
 ]);
-for (const extra of String(process.env.EXTRA_ALLOWED_ORIGINS || '').split(',')){
+for (const extra of String(process.env.EXTRA_ALLOWED_ORIGINS || '').split(',')) {
   const trimmed = extra.trim();
   if (trimmed) ALLOWED_ORIGINS.add(trimmed);
 }
 
 const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const MODEL = 'claude-haiku-4-5-20251001';
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // limite de segurança (base64 já é ~33% maior que o binário)
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_HINT_LENGTH = 240;
 const UPSTREAM_TIMEOUT_MS = 25_000;
 
-function secretsMatch(provided, expected){
+function secretsMatch(provided, expected) {
   if (typeof provided !== 'string' || typeof expected !== 'string' || !expected) return false;
   const a = Buffer.from(provided, 'utf8');
   const b = Buffer.from(expected, 'utf8');
@@ -38,9 +38,31 @@ function secretsMatch(provided, expected){
   return crypto.timingSafeEqual(a, b);
 }
 
-// Convenções de nome de arquivo aprendidas no projeto (ver CONTEXTO_PROJETO.md) — mantidas aqui pra o
-// modelo seguir o mesmo padrão que o motor de regras local já usa, mesmo em documentos/condomínios novos.
-const SYSTEM_PROMPT = `Você é um extrator de dados de documentos administrativos de condomínios brasileiros (faturas, recibos, extratos bancários, boletos, protocolos, comprovantes de pagamento, DARF, declarações, atas, orçamentos, etc.), digitalizados e às vezes com baixa qualidade de imagem ou rotacionados.
+function isOriginAllowed(origin, host) {
+  if (!origin) return false;
+  if (ALLOWED_ORIGINS.has(origin)) return true;
+  if (host) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.host === host) return true; // same-origin (ex.: preview *.vercel.app)
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function resolveProvider() {
+  const forced = String(process.env.AI_PROVIDER || '').trim().toLowerCase();
+  if (forced === 'gemini' && process.env.GEMINI_API_KEY) return 'gemini';
+  if (forced === 'anthropic' && process.env.ANTHROPIC_API_KEY) return 'anthropic';
+  if (process.env.GEMINI_API_KEY) return 'gemini';
+  if (process.env.ANTHROPIC_API_KEY) return 'anthropic';
+  return null;
+}
+
+// Convenções de nome de arquivo aprendidas no projeto (ver CONTEXTO_PROJETO.md).
+const SYSTEM_PROMPT = `Você é um extrator de dados de documentos administrativos de condomínios brasileiros (faturas, recibos, extratos bancários, boletos, protocolos, comprovantes de pagamento, DARF, declarações, atas, orçamentos, etc.), digitalizados e às vezes rotacionados ou com baixa qualidade.
 
 Responda SEMPRE e SOMENTE com um objeto JSON válido (sem markdown, sem texto antes/depois), no formato:
 {
@@ -56,30 +78,105 @@ Responda SEMPRE e SOMENTE com um objeto JSON válido (sem markdown, sem texto an
 }
 
 Convenções OBRIGATÓRIAS pra montar "nome_sugerido" (siga o padrão mais específico que se aplicar; todas em MAIÚSCULO, campos separados por espaço, sem acentos problemáticos, sem caracteres especiais de sistema de arquivos):
-- "PROTOCOLO {data}" — entrega de boletos (sem condomínio)
-- "PROTOCOLO RESERVA {condominio}" ou "TERMO {condominio} {data}" — reserva de salão de festas
-- "FATURA {EQUATORIAL|CLARO|GAS|AGUA} {condominio} {mes} {ano}"
-- "COMPROVANTE {PIX|BOLETO} {condominio} {data}"
-- "EXTRATO [APLICACAO|CAPTACAO] {condominio} {mes} {ano}"
-- "RECIBO [CARTORIO] {condominio} {data}"
+- "PROTOCOLO {DD.MM}" — protocolo de entrega de boletos / setor boletos (sem condomínio, use a data da entrega/enviado)
+- "PROTOCOLO {condominio} {MES_POR_EXTENSO}" — lista de proprietários/inquilinos/locatários de entrega da taxa de condomínio
+- "PROTOCOLO RESERVA {condominio}" ou "TERMO {condominio} {DD.MM}" — reserva de salão de festas
+- "FATURA {EQUATORIAL|CLARO|GAS|AGUA} {condominio} {MES} {ANO}"
+- "COMPROVANTE {PIX|BOLETO} {condominio} {DD.MM}"
+- "EXTRATO [APLICACAO|CAPTACAO] {condominio} {MES} {ANO}"
+- "RECIBO [CARTORIO] {condominio} {DD.MM}"
 - "NADA CONSTA {condominio} {unidade}" ou "DECLARACAO {condominio} {unidade}"
-- "BOLETO RATEIO {condominio} {unidade} {mes} {ano}"
-- "RELATORIO DESPESAS {condominio} {categoria} {data}"
-- "NOTA COBRANCA {condominio} {data}"
-- "DARF {condominio} {data}"
-- "BOLETO {condominio} {data}" — genérico, quando nenhum padrão acima se aplica mas ainda é um boleto
-- Se o tipo de documento não se encaixar em nenhum padrão acima, monte um nome análogo e coerente: TIPO_EM_MAIUSCULO + condominio (se houver) + data/mês (se houver). Nunca invente tipo genérico demais tipo "DOCUMENTO" — leia o conteúdo e nomeie pelo que ele realmente é.
+- "BOLETO RATEIO {condominio} {unidade} {MES} {ANO}"
+- "RELATORIO DESPESAS {condominio} {categoria} {DD.MM}"
+- "NOTA COBRANCA {condominio} {DD.MM}"
+- "DARF {condominio} {DD.MM}"
+- "BOLETO {condominio} {DD.MM}" — genérico, quando nenhum padrão acima se aplica mas ainda é um boleto
+- Se o tipo de documento não se encaixar em nenhum padrão acima, monte um nome análogo e coerente: TIPO_EM_MAIUSCULO + condominio (se houver) + data/mês (se houver). Nunca invente tipo genérico demais tipo "DOCUMENTO".
 
 Regras de confiança:
-- confidence deve refletir sua certeza real. Se não conseguir ler o condomínio com clareza, isso deve DERRUBAR a confiança pra abaixo de 0.7, mesmo que o tipo de documento esteja claro — o condomínio é o dado mais importante do nome pra esse fluxo (exceto nos tipos que por natureza não levam condomínio: protocolo de entrega de boletos genérico, reservas em planilha-mestre com vários condomínios, comprovante de consumo Sicredi).
-- Se a imagem estiver ilegível/rotacionada/cortada a ponto de não dar pra confiar em nada, retorne confidence baixo (< 0.4) e nome_sugerido com o melhor palpite mesmo assim (nunca null).
-- Nomes de condomínio podem vir abreviados ou com ruído de digitalização (ex: "RES.", "RESID", "EDF", "COND") — normalize pro nome completo mais provável, mas sem inventar um condomínio que não esteja escrito no documento.
+- confidence deve refletir sua certeza real. Se não conseguir ler o condomínio com clareza, isso deve DERRUBAR a confiança pra abaixo de 0.7, mesmo que o tipo esteja claro (exceto nos tipos que por natureza não levam condomínio: protocolo de entrega de boletos, reservas em planilha-mestre com vários condomínios, comprovante de consumo Sicredi).
+- Se a imagem estiver ilegível/cortada, retorne confidence baixo (< 0.4) e nome_sugerido com o melhor palpite mesmo assim (nunca null).
+- Nomes de condomínio podem vir abreviados ("RES.", "EDF", "COND") — normalize pro nome mais limpo sem inventar.
 
-Se a imagem não for um documento de condomínio (lixo, página em branco, foto não relacionada), responda com tipo_documento "nao_identificado", condominio null, nome_sugerido com um nome descritivo genérico, e confidence 0.`;
+Se a imagem não for um documento de condomínio (lixo, página em branco, foto não relacionada), responda com tipo_documento "nao_identificado", condominio null, nome_sugerido genérico e confidence 0.`;
+
+async function callGemini({ image, mimeType, userText }) {
+  const model = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+  const aiRes = await fetch(url, {
+    method: 'POST',
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType, data: image } },
+            { text: userText },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 1024,
+        responseMimeType: 'application/json',
+      },
+    }),
+  });
+  return {
+    ok: aiRes.ok,
+    status: aiRes.status,
+    retryAfter: aiRes.headers.get('retry-after'),
+    getText: async () => {
+      const data = await aiRes.json();
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    },
+    getErrorDetail: () => aiRes.text().catch(() => ''),
+  };
+}
+
+async function callAnthropic({ image, mimeType, userText }) {
+  const model = process.env.ANTHROPIC_MODEL || DEFAULT_ANTHROPIC_MODEL;
+  const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1024,
+      system: SYSTEM_PROMPT,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mimeType, data: image } },
+            { type: 'text', text: userText },
+          ],
+        },
+      ],
+    }),
+  });
+  return {
+    ok: aiRes.ok,
+    status: aiRes.status,
+    retryAfter: aiRes.headers.get('retry-after'),
+    getText: async () => {
+      const data = await aiRes.json();
+      return data?.content?.[0]?.text || '';
+    },
+    getErrorDetail: () => aiRes.text().catch(() => ''),
+  };
+}
 
 async function handler(req, res) {
   const origin = req.headers.origin;
-  if (origin && ALLOWED_ORIGINS.has(origin)) {
+  if (isOriginAllowed(origin, req.headers.host)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -93,8 +190,10 @@ async function handler(req, res) {
   if (!secretsMatch(secretHeader, process.env.RENOMEADOR_SHARED_SECRET)) {
     return res.status(401).json({ error: 'unauthorized' });
   }
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return res.status(500).json({ error: 'server_misconfigured', detail: 'ANTHROPIC_API_KEY ausente' });
+
+  const provider = resolveProvider();
+  if (!provider) {
+    return res.status(500).json({ error: 'server_misconfigured', detail: 'Configure GEMINI_API_KEY ou ANTHROPIC_API_KEY' });
   }
 
   const { image, mimeType, hint, loteCondominio } = req.body || {};
@@ -124,45 +223,23 @@ async function handler(req, res) {
     : 'Extraia os dados deste documento e responda SOMENTE com o JSON pedido.';
 
   try {
-    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 1024,
-        system: SYSTEM_PROMPT,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: safeMimeType, data: image } },
-              { type: 'text', text: userText },
-            ],
-          },
-        ],
-      }),
-    });
+    const upstream = provider === 'gemini'
+      ? await callGemini({ image, mimeType: safeMimeType, userText })
+      : await callAnthropic({ image, mimeType: safeMimeType, userText });
 
-    if (!aiRes.ok) {
-      const detail = await aiRes.text().catch(() => '');
-      if (aiRes.status === 429) {
-        const retryAfter = aiRes.headers.get('retry-after');
-        if (retryAfter) res.setHeader('Retry-After', retryAfter);
-        return res.status(429).json({ error: 'ai_rate_limited', detail });
+    if (!upstream.ok) {
+      const detail = await upstream.getErrorDetail();
+      if (upstream.status === 429) {
+        if (upstream.retryAfter) res.setHeader('Retry-After', upstream.retryAfter);
+        return res.status(429).json({ error: 'ai_rate_limited', provider, detail });
       }
-      return res.status(502).json({ error: 'ai_upstream_error', status: aiRes.status, detail });
+      return res.status(502).json({ error: 'ai_upstream_error', provider, status: upstream.status, detail });
     }
 
-    const data = await aiRes.json();
-    const raw = data?.content?.[0]?.text || '';
+    const raw = await upstream.getText();
     const parsed = extractJson(raw);
     if (!parsed) {
-      return res.status(502).json({ error: 'ai_bad_output', raw });
+      return res.status(502).json({ error: 'ai_bad_output', provider, raw });
     }
 
     if (typeof parsed.nome_sugerido === 'string') {
@@ -173,17 +250,18 @@ async function handler(req, res) {
         .trim();
     }
 
+    res.setHeader('X-AI-Provider', provider);
     return res.status(200).json(parsed);
   } catch (err) {
     if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-      return res.status(504).json({ error: 'ai_timeout' });
+      return res.status(504).json({ error: 'ai_timeout', provider });
     }
-    return res.status(500).json({ error: 'server_error', detail: String(err && err.message || err) });
+    return res.status(500).json({ error: 'server_error', provider, detail: String(err && err.message || err) });
   }
 }
 
 function extractJson(text) {
-  const match = text.match(/\{[\s\S]*\}/);
+  const match = String(text || '').match(/\{[\s\S]*\}/);
   if (!match) return null;
   try {
     return JSON.parse(match[0]);

@@ -68,7 +68,7 @@ export const MIN_TEXT_LEN_TO_SKIP_OCR = 20; // se o PDF já tiver texto pesquis�
 // DOCUMENT_TYPES/CONDOMINIOS continuam sendo o caminho rápido (grátis, offline, determinístico) pros casos
 // que já aprendemos. A IA entra só quando esse caminho não resolve: PDF só-imagem, condomínio fora da
 // whitelist, tipo de documento nunca visto. Ver identifyDocumentSmart() em ai-extraction.js.
-export const AI_EXTRACT_ENDPOINT = 'https://renomeador-api.vercel.app/api/extract'; // URL padrão (pode ser sobrescrita na UI)
+export const AI_EXTRACT_ENDPOINT = '/api/extract'; // same-origin no Vercel (pode ser sobrescrito na UI se hospedar separado)
 export const AI_SECRET_STORAGE_KEY = 'renomeador_ai_secret_v1';
 export const AI_ENABLED_STORAGE_KEY = 'renomeador_ai_enabled_v1';
 export const AI_ENDPOINT_STORAGE_KEY = 'renomeador_ai_endpoint_v1';

@@ -28,6 +28,7 @@ const { CONFIDENCE_THRESHOLD } = await import('../config.js');
 
 const require = createRequire(import.meta.url);
 const extractHandler = require('../api/extract.js');
+const healthHandler = require('../api/health.js');
 
 test('pdf-utils: sanitizeFilename remove caracteres inválidos e barras (evita subpasta no ZIP)', () => {
   assert.equal(sanitizeFilename('NADA CONSTA VIVANT 101/102'), 'NADA CONSTA VIVANT 101.102');
@@ -205,6 +206,19 @@ test('api/extract.js: CORS para domínio customizado, métodos e autenticação'
     await extractHandler({ method: 'POST', headers: { 'x-renomeador-secret': 'segredo-teste-123' }, body: {} }, rMissing);
     assert.equal(rMissing.result.statusCode, 400);
     assert.equal(rMissing.result.body.error, 'missing_image');
+
+    // Same-origin em preview *.vercel.app é aceito automaticamente
+    const rPreview = mockRes();
+    await extractHandler({ method: 'OPTIONS', headers: { origin: 'https://renomeador-preview.vercel.app', host: 'renomeador-preview.vercel.app' } }, rPreview);
+    assert.equal(rPreview.result.statusCode, 204);
+    assert.equal(rPreview.result.headers['Access-Control-Allow-Origin'], 'https://renomeador-preview.vercel.app');
+
+    // Health endpoint reporta provedor sem expor segredo
+    const rHealth = mockRes();
+    healthHandler({ method: 'GET', headers: {} }, rHealth);
+    assert.equal(rHealth.result.statusCode, 200);
+    assert.equal(rHealth.result.body.ok, true);
+    assert.equal(rHealth.result.body.provider, 'anthropic');
   } finally {
     if (prevSecret === undefined) delete process.env.RENOMEADOR_SHARED_SECRET;
     else process.env.RENOMEADOR_SHARED_SECRET = prevSecret;

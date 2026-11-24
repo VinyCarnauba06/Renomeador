@@ -29,7 +29,7 @@
     <div class="aiConfigRow">
       <label class="aiToggleLabel">
         <input type="checkbox" id="aiEnabledToggle">
-        <span>Usar IA (Claude Vision) quando as regras locais não resolverem</span>
+        <span>Usar IA (Gemini Flash / Claude Vision) quando as regras locais não resolverem</span>
       </label>
     </div>
     <div class="aiConfigGrid">
@@ -38,8 +38,8 @@
         <input type="password" id="aiSecretInput" class="aiInput" placeholder="Cole a chave compartilhada do seu backend">
       </div>
       <div>
-        <label for="aiEndpointInput" class="aiFieldLabel">URL do backend (endpoint /api/extract)</label>
-        <input type="url" id="aiEndpointInput" class="aiInput" placeholder="https://seu-projeto.vercel.app/api/extract">
+        <label for="aiEndpointInput" class="aiFieldLabel">URL do backend (padrão no Vercel: /api/extract)</label>
+        <input type="text" id="aiEndpointInput" class="aiInput" placeholder="/api/extract">
       </div>
     </div>
     <div class="aiConfigActions">
