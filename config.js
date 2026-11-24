@@ -141,15 +141,22 @@ export const DOCUMENT_TYPES = [
   },
   {
     // Termo de requisição/responsabilidade COM vistoria estruturada (antes/depois da festa) — leva condomínio + data do uso.
-    // Sinal específico: "VISTORIA ... NO DIA DD/MM/AAAA" ou seção "ANTES DA FESTA" — não basta a palavra "vistoria" aparecer solta
-    // (pode ser só uma observação manuscrita em outro tipo de documento, como numa ficha de reserva).
+    // Sinal específico: "VISTORIA ... NO DIA DD/MM/AAAA", "VISTORIA ... UTILIZAÇÃO: DD/MM/AAAA" ou seção "ANTES DA FESTA".
     id: "termo_com_vistoria",
-    test: (norm) => /VISTORIA[^.\n]{0,40}NO\s+DIA\s+\d{2}\D\d{2}\D\d{4}/.test(norm) || /ANTES\s+DA\s+FESTA/.test(norm),
+    test: (norm) => /VISTORIA[^.\n]{0,40}NO\s+DIA\s+\d{2}\D\d{2}\D\d{4}/.test(norm)
+      || (norm.includes('VISTORIA') && (/NO\s+DIA\s+\d{2}\D\d{2}\D\d{4}/.test(norm) || /UTILIZA[CÇ][AÃ]O\s*[:\-]?\s*\d{2}\D\d{2}\D\d{4}/.test(norm)))
+      || /ANTES\s+DA\s+FESTA/.test(norm),
     extract: (norm, raw) => {
-      const condominio = resolverCondominio(norm, raw);
+      let condominio = resolverCondominio(norm, raw);
+      if (!condominio){
+        // Padrão real do Termo de Salão de Festas: "SALÃO DE FESTAS no MARAMBAIA no dia 14/11/2026"
+        const mSalao = raw.match(/SAL[AÃ]O\s+DE\s+FESTAS\s+(?:NO|NA|DO|DA)\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)\s+NO\s+DIA\b/i);
+        if (mSalao) condominio = mSalao[1].replace(/\s+/g, ' ').trim().toUpperCase();
+      }
       let m = raw.match(/NO\s+DIA\s+(\d{2}\D\d{2}\D\d{4})/i);
-      const dataDDMM = m ? findData(m[1]).dataDDMM : findData(raw).dataDDMM;
-      return { condominio, dataDDMM };
+      if (!m) m = raw.match(/UTILIZA[CÇ][AÃ]O\s*[:\-]?\s*(\d{2}\D\d{2}\D\d{4})/i);
+      const d = m ? findData(m[1]) : findData(raw);
+      return { condominio, dataDDMM: d.dataDDMM, mes: d.mes, ano: d.ano };
     },
     format: f => f.condominio && f.dataDDMM ? `TERMO ${f.condominio} ${f.dataDDMM}` : null,
     confidence: f => (f.condominio ? 0.5 : 0.15) + (f.dataDDMM ? 0.4 : 0)
@@ -158,7 +165,14 @@ export const DOCUMENT_TYPES = [
     // Ficha de reserva / termo de requisição do salão de festas SEM vistoria estruturada — só protocolo + condomínio, sem data
     id: "protocolo_reserva_salao",
     test: (norm) => /(FICHA\s+DE\s+RESERVA|TERMO\s+DE\s+REQUISI[CÇ][AÃ]O)/.test(norm) && /SAL[AÃ]O\s+DE\s+FESTAS/.test(norm),
-    extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw) }),
+    extract: (norm, raw) => {
+      let condominio = resolverCondominio(norm, raw);
+      if (!condominio){
+        const mSalao = raw.match(/SAL[AÃ]O\s+DE\s+FESTAS\s+(?:NO|NA|DO|DA)\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9'\s]{2,40}?)\s+NO\s+DIA\b/i);
+        if (mSalao) condominio = mSalao[1].replace(/\s+/g, ' ').trim().toUpperCase();
+      }
+      return { condominio };
+    },
     format: f => f.condominio ? `PROTOCOLO RESERVA ${f.condominio}` : null,
     confidence: f => f.condominio ? 0.85 : 0.3
   },

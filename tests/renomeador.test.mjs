@@ -118,6 +118,17 @@ test('rules-engine: detectores principais de DOCUMENT_TYPES', () => {
   assert.equal(propLoc.nome, 'PROTOCOLO BREEZES SETEMBRO');
   assert.ok(propLoc.confidence >= CONFIDENCE_THRESHOLD);
 
+  // Termo de Salão de Festas com Vistoria + Utilização + condomínio fora da whitelist ("SALÃO DE FESTAS no MARAMBAIA no dia 14/11/2026")
+  const termoMarambaia = identifyDocument(
+    'MARAMBAIA\nTermo de Requisição e Responsabilidade para uso do SALÃO DE FESTAS\n(Vistoria: 13/11/2026 | Horário | Utilização: 14/11/2026)\nEu, JOÃO morador(a) do apartamento 802, requisito o SALÃO DE FESTAS no MARAMBAIA no dia 14/11/2026.\nNão perturbar a boa ordem do Edifício e sossego dos demais condôminos',
+    0.85
+  );
+  assert.equal(termoMarambaia.ruleId, 'termo_com_vistoria');
+  assert.equal(termoMarambaia.nome, 'TERMO MARAMBAIA 14.11');
+  assert.equal(termoMarambaia.fields.condominio, 'MARAMBAIA');
+  assert.equal(termoMarambaia.fields.ano, '2026');
+  assert.ok(termoMarambaia.confidence >= CONFIDENCE_THRESHOLD);
+
   // Equatorial fatura real vs demonstrativo que só cita Equatorial
   const eq = identifyDocument('EQUATORIAL ENERGIA\nCONDOMINIO VIVANT\nCONTA MÊS: 07/2026\nNÚMERO DA UC: 1020304567', null);
   assert.equal(eq.ruleId, 'fatura_energia_equatorial');
