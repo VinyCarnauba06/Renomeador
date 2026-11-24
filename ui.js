@@ -91,6 +91,74 @@ let isBatchRunning = false;
 let cancelRequested = false;
 let batchStartTime = 0;
 let wakeLockSentinel = null;
+let cloudSyncActive = false;
+
+function getCondominiosEndpoint(){
+  const extractUrl = getAiEndpoint();
+  return extractUrl.replace(/\/extract\/?$/i, '/condominios');
+}
+
+function mergeCondominiosLocais(remoteItems){
+  if (!Array.isArray(remoteItems)) return 0;
+  let mudancas = 0;
+  for (const entry of remoteItems){
+    if (!entry || typeof entry.nome !== 'string') continue;
+    const nome = entry.nome.trim().toUpperCase();
+    if (!nome) continue;
+    let existente = learnedCondominios.find(c => c.nome === nome);
+    if (!existente){
+      existente = { nome, aliases: [nome] };
+      learnedCondominios.push(existente);
+      mudancas++;
+    }
+    const aliases = Array.isArray(entry.aliases) ? entry.aliases : [];
+    for (const a of aliases){
+      const clean = String(a || '').trim().toUpperCase();
+      if (clean && !existente.aliases.includes(clean)){
+        existente.aliases.push(clean);
+        mudancas++;
+      }
+    }
+  }
+  if (mudancas > 0){
+    saveLearnedCondominios();
+    preencherLoteCondominioSelect();
+  }
+  return mudancas;
+}
+
+async function syncCondominiosFromCloud(){
+  const secret = getAiSecret();
+  if (!secret) return;
+  try {
+    const res = await fetch(getCondominiosEndpoint(), {
+      method: 'GET',
+      headers: { 'x-renomeador-secret': secret },
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    cloudSyncActive = true;
+    mergeCondominiosLocais(data.items);
+    updateLearnCount();
+  } catch { /* offline ou Supabase ainda não configurado — segue com localStorage */ }
+}
+
+async function pushCondominiosToCloud(entries){
+  const secret = getAiSecret();
+  if (!secret || !Array.isArray(entries) || entries.length === 0) return;
+  try {
+    const res = await fetch(getCondominiosEndpoint(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-renomeador-secret': secret },
+      body: JSON.stringify({ items: entries }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    cloudSyncActive = true;
+    mergeCondominiosLocais(data.items);
+    updateLearnCount();
+  } catch { /* fallback localStorage já salvo */ }
+}
 
 async function acquireWakeLock(){
   try {
@@ -191,6 +259,7 @@ aiSaveBtn.addEventListener('click', () => {
   setAiEnabled(aiEnabledToggle.checked && Boolean(secret));
   updateAiStatusButton();
   aiConfigPanel.style.display = 'none';
+  if (secret) syncCondominiosFromCloud();
 });
 
 aiClearBtn.addEventListener('click', () => {
@@ -684,6 +753,8 @@ function ensinarCondominio(row){
   if (!nomeLimpo) return;
 
   aprenderCondominio(nomeLimpo, sugestao);
+  const salvo = learnedCondominios.find(c => c.nome === nomeLimpo.toUpperCase());
+  if (salvo) pushCondominiosToCloud([salvo]);
   updateLearnCount();
   preencherLoteCondominioSelect();
 
@@ -855,9 +926,10 @@ clearBtn.addEventListener('click', () => {
 
 function updateLearnCount(){
   const n = learnedCondominios.length;
+  const sufixo = cloudSyncActive ? 'sincronizados na nuvem' : 'salvos neste navegador';
   learnCount.textContent = n === 0
-    ? 'Nenhum condomínio aprendido manualmente ainda.'
-    : `${n} condomínio(s) aprendido(s) manualmente (salvos neste navegador).`;
+    ? (cloudSyncActive ? 'Nenhum condomínio aprendido ainda (nuvem conectada).' : 'Nenhum condomínio aprendido manualmente ainda.')
+    : `${n} condomínio(s) aprendido(s) manualmente (${sufixo}).`;
 }
 
 function preencherLoteCondominioSelect(){
@@ -926,6 +998,7 @@ importLearnInput.addEventListener('change', async () => {
     }
   }
   saveLearnedCondominios();
+  pushCondominiosToCloud(learnedCondominios);
   updateLearnCount();
   preencherLoteCondominioSelect();
 
@@ -946,3 +1019,4 @@ importLearnInput.addEventListener('change', async () => {
 updateLearnCount();
 preencherLoteCondominioSelect();
 updateAiStatusButton();
+syncCondominiosFromCloud();

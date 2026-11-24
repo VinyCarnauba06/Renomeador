@@ -5,6 +5,7 @@
 
 // CommonJS de propósito — evita depender de "type": "module" no package.json (Vercel detecta sozinho).
 const crypto = require('crypto');
+const { getCachedExtraction, saveCachedExtraction, logExtraction } = require('./_supabase');
 
 module.exports = handler;
 module.exports.config = { runtime: 'nodejs' };
@@ -222,6 +223,24 @@ async function handler(req, res) {
     ? `Extraia os dados deste documento e responda SOMENTE com o JSON pedido.\n${extraNotes.join('\n')}`
     : 'Extraia os dados deste documento e responda SOMENTE com o JSON pedido.';
 
+  const imageHash = crypto.createHash('sha256').update(image).digest('hex');
+
+  // Cache por SHA-256 (ignora cache apenas em revisão forçada com hint explícito)
+  if (!safeHint) {
+    const cached = await getCachedExtraction(imageHash);
+    if (cached && cached.result) {
+      logExtraction({
+        provider: cached.provider,
+        tipoDocumento: cached.result.tipo_documento,
+        confidence: cached.result.confidence,
+        cacheHit: true,
+      }).catch(() => {});
+      res.setHeader('X-AI-Provider', cached.provider || provider);
+      res.setHeader('X-Cache', 'HIT');
+      return res.status(200).json(cached.result);
+    }
+  }
+
   try {
     const upstream = provider === 'gemini'
       ? await callGemini({ image, mimeType: safeMimeType, userText })
@@ -250,7 +269,19 @@ async function handler(req, res) {
         .trim();
     }
 
+    // Persiste no cache apenas resultados com confiança minimamente útil (>= 0.5)
+    if (typeof parsed.confidence !== 'number' || parsed.confidence >= 0.5) {
+      saveCachedExtraction(imageHash, provider, parsed).catch(() => {});
+    }
+    logExtraction({
+      provider,
+      tipoDocumento: parsed.tipo_documento,
+      confidence: parsed.confidence,
+      cacheHit: false,
+    }).catch(() => {});
+
     res.setHeader('X-AI-Provider', provider);
+    res.setHeader('X-Cache', 'MISS');
     return res.status(200).json(parsed);
   } catch (err) {
     if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {

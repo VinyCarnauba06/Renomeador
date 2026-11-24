@@ -29,6 +29,7 @@ const { CONFIDENCE_THRESHOLD } = await import('../config.js');
 const require = createRequire(import.meta.url);
 const extractHandler = require('../api/extract.js');
 const healthHandler = require('../api/health.js');
+const condominiosHandler = require('../api/condominios.js');
 
 test('pdf-utils: sanitizeFilename remove caracteres inválidos e barras (evita subpasta no ZIP)', () => {
   assert.equal(sanitizeFilename('NADA CONSTA VIVANT 101/102'), 'NADA CONSTA VIVANT 101.102');
@@ -219,6 +220,15 @@ test('api/extract.js: CORS para domínio customizado, métodos e autenticação'
     assert.equal(rHealth.result.statusCode, 200);
     assert.equal(rHealth.result.body.ok, true);
     assert.equal(rHealth.result.body.provider, 'anthropic');
+
+    // /api/condominios bloqueia sem segredo e retorna 503 se SUPABASE_URL não configurado
+    const rCondoUnauth = mockRes();
+    await condominiosHandler({ method: 'GET', headers: {} }, rCondoUnauth);
+    assert.equal(rCondoUnauth.result.statusCode, 401);
+
+    const rCondoNoDb = mockRes();
+    await condominiosHandler({ method: 'GET', headers: { 'x-renomeador-secret': 'segredo-teste-123' } }, rCondoNoDb);
+    assert.equal(rCondoNoDb.result.statusCode, 503);
   } finally {
     if (prevSecret === undefined) delete process.env.RENOMEADOR_SHARED_SECRET;
     else process.env.RENOMEADOR_SHARED_SECRET = prevSecret;
