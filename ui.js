@@ -1,18 +1,39 @@
 // ui.js
-// Orquestração de DOM: refs de elementos, upload/processamento de arquivos, render das linhas da tabela,
-// fluxo de "ensinar condomínio", revisão de baixa confiança, download do ZIP e exportar/importar aprendizado.
-// Importa a lógica pura dos outros módulos — não define regra de negócio nenhuma aqui.
-//
-// Import circular com pdf-merge.js: aquele módulo precisa de `items`/`usedNames`/`uniqueName`/`renderRow`/
-// `reorderTable`/`updateCount`/`escapeHtml` daqui; este módulo precisa de `mergeQueueIds`/`toggleMergeSelection`
-// de lá pra desenhar o checkbox de junção em cada linha. Seguro pelo mesmo motivo dos outros ciclos deste
-// projeto (as referências cruzadas só são lidas dentro de funções/callbacks, nunca na avaliação do módulo)
-// — ver comentário em config.js.
+// Orquestração de DOM: upload com concorrência controlada, tabela com edição inline em qualquer linha,
+// filtros/busca, preview embutido de PDF, configuração de IA sem prompt() surpresa, aprendizado de
+// condomínios e exportação ZIP/individual. Sem import circular com pdf-merge.js (estado vive em state.js).
 import { CONFIDENCE_THRESHOLD } from './config.js';
-import { identifyDocument, aprenderCondominio, todosCondominios, findCondominioFallback, learnedCondominios, saveLearnedCondominios, setLoteHintProvider } from './rules-engine.js';
-import { identifyDocumentSmart } from './ai-extraction.js';
-import { reviewDocument } from './ocr-pipeline.js';
-import { mergeQueueIds, toggleMergeSelection } from './pdf-merge.js';
+import {
+  identifyDocument,
+  aprenderCondominio,
+  todosCondominios,
+  findCondominioFallback,
+  learnedCondominios,
+  saveLearnedCondominios,
+  setLoteHintProvider,
+} from './rules-engine.js';
+import {
+  identifyDocumentSmart,
+  reviewDocumentSmart,
+  getAiSecret,
+  setAiSecret,
+  getAiEndpoint,
+  setAiEndpoint,
+  isAiEnabled,
+  setAiEnabled,
+  isAiReady,
+} from './ai-extraction.js';
+import {
+  items,
+  mergeQueueIds,
+  reserveUniqueName,
+  releaseName,
+  replaceReservedName,
+  removeItemById,
+  clearAllState,
+} from './state.js';
+import { escapeHtml, escapeAttr, stripPdfExt } from './pdf-utils.js';
+import { initPdfMerge, toggleMergeSelection, clearMergeQueue, renderMergePanel } from './pdf-merge.js';
 
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('fileInput');
@@ -20,6 +41,11 @@ const loteCondominioSelect = document.getElementById('loteCondominioSelect');
 const progressWrap = document.getElementById('progressWrap');
 const progressLabel = document.getElementById('progressLabel');
 const progressFill = document.getElementById('progressFill');
+const filterBar = document.getElementById('filterBar');
+const searchInput = document.getElementById('searchInput');
+const countAllEl = document.getElementById('countAll');
+const countPendingEl = document.getElementById('countPending');
+const countOkEl = document.getElementById('countOk');
 const resultsTable = document.getElementById('resultsTable');
 const resultsBody = document.getElementById('resultsBody');
 const empty = document.getElementById('empty');
@@ -33,12 +59,121 @@ const exportLearnBtn = document.getElementById('exportLearnBtn');
 const importLearnBtn = document.getElementById('importLearnBtn');
 const importLearnInput = document.getElementById('importLearnInput');
 
-// rules-engine.js não pode depender de DOM diretamente (precisa ficar testável em Node isolado) — por isso
-// a dica de condomínio do lote é injetada aqui como uma função, em vez do motor de regras ler o `<select>` ele mesmo.
+// Configuração da IA
+const aiConfigBtn = document.getElementById('aiConfigBtn');
+const aiConfigPanel = document.getElementById('aiConfigPanel');
+const aiEnabledToggle = document.getElementById('aiEnabledToggle');
+const aiSecretInput = document.getElementById('aiSecretInput');
+const aiEndpointInput = document.getElementById('aiEndpointInput');
+const aiSaveBtn = document.getElementById('aiSaveBtn');
+const aiClearBtn = document.getElementById('aiClearBtn');
+const aiCloseBtn = document.getElementById('aiCloseBtn');
+
+// Modal de preview embutido
+const previewModal = document.getElementById('previewModal');
+const previewTitle = document.getElementById('previewTitle');
+const previewFrame = document.getElementById('previewFrame');
+const previewNewTabBtn = document.getElementById('previewNewTabBtn');
+const previewCloseBtn = document.getElementById('previewCloseBtn');
+
 setLoteHintProvider(() => loteCondominioSelect && loteCondominioSelect.value);
 
-export let items = []; // { id, originalFile, originalName, suggestedName, confidence, fields, status, error }
-export let usedNames = new Set();
+let activeFilter = 'all';
+let currentPreviewUrl = null;
+
+initPdfMerge({
+  onMerged: novaLinha => {
+    renderRow(novaLinha);
+    reorderTable();
+    applyFilters();
+    updateCount();
+  },
+});
+
+/* ============================================================
+   CONFIGURAÇÃO DA IA NA INTERFACE
+   ============================================================ */
+
+function updateAiStatusButton(){
+  const ready = isAiReady();
+  const hasSecret = Boolean(getAiSecret());
+  aiConfigBtn.classList.toggle('active', ready);
+  aiConfigBtn.classList.toggle('off', !ready);
+  if (ready){
+    aiConfigBtn.textContent = '⚙ IA: ativa';
+  } else if (hasSecret){
+    aiConfigBtn.textContent = '⚙ IA: pausada';
+  } else {
+    aiConfigBtn.textContent = '⚙ IA: configurar';
+  }
+}
+
+function openAiConfigPanel(){
+  aiEnabledToggle.checked = isAiEnabled();
+  aiSecretInput.value = getAiSecret() || '';
+  aiEndpointInput.value = getAiEndpoint();
+  aiConfigPanel.style.display = 'block';
+}
+
+aiConfigBtn.addEventListener('click', () => {
+  if (aiConfigPanel.style.display === 'none') openAiConfigPanel();
+  else aiConfigPanel.style.display = 'none';
+});
+
+aiCloseBtn.addEventListener('click', () => { aiConfigPanel.style.display = 'none'; });
+
+aiSaveBtn.addEventListener('click', () => {
+  const secret = aiSecretInput.value.trim();
+  const endpoint = aiEndpointInput.value.trim();
+  setAiSecret(secret);
+  setAiEndpoint(endpoint);
+  setAiEnabled(aiEnabledToggle.checked && Boolean(secret));
+  updateAiStatusButton();
+  aiConfigPanel.style.display = 'none';
+});
+
+aiClearBtn.addEventListener('click', () => {
+  setAiSecret('');
+  setAiEnabled(false);
+  aiSecretInput.value = '';
+  aiEnabledToggle.checked = false;
+  updateAiStatusButton();
+});
+
+/* ============================================================
+   PREVIEW EMBUTIDO DE PDF (sem vazamento de Blob URL)
+   ============================================================ */
+
+function closePreview(){
+  previewModal.style.display = 'none';
+  previewFrame.src = 'about:blank';
+  if (currentPreviewUrl){
+    URL.revokeObjectURL(currentPreviewUrl);
+    currentPreviewUrl = null;
+  }
+}
+
+function openPreview(row){
+  if (!row.originalFile) return;
+  closePreview();
+  currentPreviewUrl = URL.createObjectURL(row.originalFile);
+  previewTitle.textContent = row.suggestedName || row.originalName;
+  previewFrame.src = currentPreviewUrl;
+  previewModal.style.display = 'flex';
+}
+
+previewNewTabBtn.addEventListener('click', () => {
+  if (currentPreviewUrl) window.open(currentPreviewUrl, '_blank');
+});
+previewCloseBtn.addEventListener('click', closePreview);
+previewModal.addEventListener('click', e => { if (e.target === previewModal) closePreview(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && previewModal.style.display !== 'none') closePreview();
+});
+
+/* ============================================================
+   UPLOAD & PROCESSAMENTO EM LOTES COM CONCORRÊNCIA CONTROLADA
+   ============================================================ */
 
 drop.addEventListener('click', () => fileInput.click());
 drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag'); });
@@ -53,26 +188,45 @@ fileInput.addEventListener('change', e => {
   fileInput.value = '';
 });
 
-export function uniqueName(base){
-  let candidate = base;
-  let n = 2;
-  while (usedNames.has(candidate.toUpperCase())){
-    candidate = `${base} (${n})`;
-    n++;
-  }
-  usedNames.add(candidate.toUpperCase());
-  return candidate;
-}
-
-// Tamanho do "lote interno" de processamento. Em vez de encarar os 200 arquivos de um lote de digitalização
-// como uma fila só, processa em blocos de 30: lê os 30, organiza o que deu certo e o que precisa de revisão,
-// devolve o controle pro navegador por um instante (evita a aba travar em lotes grandes) e só então segue
-// pro próximo bloco de 30 — automaticamente, sem precisar clicar em nada — até acabar tudo.
 const TAMANHO_LOTE_INTERNO = 30;
+const AI_CONCURRENCY = 3;
+
+async function processSingleRow(row){
+  try {
+    const result = await identifyDocumentSmart(row.originalFile);
+    row.fields = result.fields;
+    row.ruleId = result.ruleId;
+    row.usedOCR = result.usedOCR;
+    row.usedAI = result.usedAI;
+    row.rotationUsed = result.rotationUsed;
+    row.ocrText = result.text;
+    row.ocrConfidencePct = result.usedOCR ? Math.round((result.confidence || 0) * 100) : null;
+
+    if (result.nome && result.confidence >= CONFIDENCE_THRESHOLD){
+      row.suggestedName = reserveUniqueName(result.nome);
+      row.confidence = result.confidence;
+      row.status = 'ok';
+    } else if (result.nome){
+      row.suggestedName = reserveUniqueName(result.nome);
+      row.confidence = result.confidence;
+      row.status = 'low';
+    } else {
+      row.suggestedName = reserveUniqueName(stripPdfExt(row.originalName));
+      row.confidence = 0;
+      row.status = 'unidentified';
+    }
+  } catch (err){
+    console.error(err);
+    row.status = 'error';
+    row.error = err.message || String(err);
+    row.suggestedName = reserveUniqueName(stripPdfExt(row.originalName));
+  }
+}
 
 async function handleFiles(files){
   if (!files.length) return;
   empty.style.display = 'none';
+  filterBar.style.display = 'flex';
   resultsTable.style.display = 'table';
   actionsBar.style.display = 'flex';
   progressWrap.style.display = 'block';
@@ -86,119 +240,170 @@ async function handleFiles(files){
     const inicio = bloco * TAMANHO_LOTE_INTERNO;
     const arquivosDoBloco = files.slice(inicio, inicio + TAMANHO_LOTE_INTERNO);
 
-    for (const file of arquivosDoBloco){
+    const rowsDoBloco = arquivosDoBloco.map(file => {
       const id = 'f' + Math.random().toString(36).slice(2);
-      const row = { id, originalFile: file, originalName: file.name, suggestedName: null, confidence: 0, fields: {}, status: 'processing', error: null };
+      const row = {
+        id,
+        originalFile: file,
+        originalName: file.name,
+        suggestedName: null,
+        confidence: 0,
+        fields: {},
+        status: 'processing',
+        error: null,
+      };
       items.push(row);
       renderRow(row);
+      return row;
+    });
 
-      try {
-        const result = await identifyDocumentSmart(file);
-        row.fields = result.fields;
-        row.ruleId = result.ruleId;
-        row.usedOCR = result.usedOCR;
-        row.usedAI = result.usedAI;
-        row.rotationUsed = result.rotationUsed;
-        row.ocrText = result.text;
-        // Confiança de OCR bruta só existe no pipeline local antigo; no caminho de regras locais com texto
-        // nativo e no caminho de IA, result.confidence já É a confiança final — não há uma métrica separada.
-        row.ocrConfidencePct = result.usedOCR ? Math.round((result.confidence || 0) * 100) : null;
-
-        if (result.nome && result.confidence >= CONFIDENCE_THRESHOLD){
-          row.suggestedName = uniqueName(result.nome) + '.pdf';
-          row.confidence = result.confidence;
-          row.status = 'ok';
-        } else if (result.nome){
-          row.suggestedName = uniqueName(result.nome) + '.pdf';
-          row.confidence = result.confidence;
-          row.status = 'low';
-        } else {
-          row.suggestedName = uniqueName(file.name.replace(/\.pdf$/i,'')) + '.pdf';
-          row.confidence = 0;
-          row.status = 'unidentified';
-        }
-      } catch (err){
-        console.error(err);
-        row.status = 'error';
-        row.error = err.message || String(err);
-        row.suggestedName = uniqueName(file.name.replace(/\.pdf$/i,'')) + '.pdf';
+    // Com IA ativa, roda 3 chamadas em paralelo (ganho de ~3x); no OCR local puro, mantém sequencial (1 worker).
+    const concurrency = isAiReady() ? AI_CONCURRENCY : 1;
+    let nextIdx = 0;
+    const workers = Array.from({ length: Math.min(concurrency, rowsDoBloco.length) }, async () => {
+      while (nextIdx < rowsDoBloco.length){
+        const current = rowsDoBloco[nextIdx++];
+        await processSingleRow(current);
+        done++;
+        updateProgress(done, total, bloco + 1, totalBlocos);
+        renderRow(current);
       }
+    });
+    await Promise.all(workers);
 
-      done++;
-      updateProgress(done, total, bloco + 1, totalBlocos);
-      renderRow(row);
-    }
-
-    // Fim do bloco de 30: separa o que já está pronto do que precisa de revisão antes de seguir.
     reorderTable();
+    applyFilters();
     if (bloco < totalBlocos - 1){
-      await new Promise(resolve => setTimeout(resolve, 0)); // devolve o controle pro navegador entre blocos
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
   }
 
   progressLabel.textContent = `Concluído: ${total} documento(s) processado(s).`;
-  reorderTable(); // deixa o que precisa de revisão no topo e o que já está pronto no fim
+  reorderTable();
+  applyFilters();
   updateCount();
+  updateAiStatusButton(); // reflete se uma chave 401 foi limpa durante o lote
 }
 
 function updateProgress(done, total, bloco, totalBlocos){
-  const pct = total ? Math.round((done/total)*100) : 0;
+  const pct = total ? Math.round((done / total) * 100) : 0;
   progressLabel.textContent = (totalBlocos && totalBlocos > 1)
     ? `Lote ${bloco} de ${totalBlocos} (30 por vez) — ${done} de ${total} documentos no total...`
     : `Processando ${done} de ${total} documentos...`;
   progressFill.style.width = pct + '%';
 }
 
+/* ============================================================
+   FILTROS E RENDERIZAÇÃO DA TABELA
+   ============================================================ */
+
+function applyFilters(){
+  const query = (searchInput ? searchInput.value : '').trim().toLowerCase();
+  for (const r of items){
+    const tr = document.getElementById('row-' + r.id);
+    if (!tr) continue;
+    const matchesTab =
+      activeFilter === 'all' ||
+      (activeFilter === 'ok' && r.status === 'ok') ||
+      (activeFilter === 'pending' && r.status !== 'ok');
+    const matchesSearch = !query || [
+      r.originalName,
+      r.suggestedName,
+      r.fields && r.fields.condominio,
+      r.fields && r.fields.tipo,
+    ].some(v => v && String(v).toLowerCase().includes(query));
+
+    tr.classList.toggle('hiddenRow', !(matchesTab && matchesSearch));
+  }
+}
+
+document.querySelectorAll('.filterBtn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeFilter = btn.dataset.filter;
+    document.querySelectorAll('.filterBtn').forEach(b => b.classList.toggle('active', b === btn));
+    applyFilters();
+  });
+});
+
+if (searchInput){
+  searchInput.addEventListener('input', applyFilters);
+}
+
 function fieldsSummary(f){
   if (!f) return '';
   const parts = [];
-  if (f.tipo) parts.push(`<b>Tipo:</b> ${f.tipo}`);
-  if (f.condominio) parts.push(`<b>Condomínio:</b> ${f.condominio}`);
-  if (f.dataDDMM) parts.push(`<b>Data:</b> ${f.dataDDMM}${f.ano ? '.'+f.ano : ''}`);
-  else if (f.mes || f.ano) parts.push(`<b>Mês/Ano:</b> ${f.mes||'?'} ${f.ano||''}`);
-  else if (f.mesCompleto || f.ano) parts.push(`<b>Mês/Ano:</b> ${f.mesCompleto||'?'} ${f.ano||''}`);
-  if (f.unidade) parts.push(`<b>Unidade:</b> ${f.unidade}`);
-  if (f.ucSuffix) parts.push(`<b>UC:</b> ...${f.ucSuffix}`);
-  if (f.apartamento) parts.push(`<b>Apto:</b> ${f.apartamento}`);
-  if (f.numeroProtocolo) parts.push(`<b>Nº Protocolo:</b> ${f.numeroProtocolo}`);
+  if (f.tipo) parts.push(`<b>Tipo:</b> ${escapeHtml(f.tipo)}`);
+  if (f.condominio) parts.push(`<b>Condomínio:</b> ${escapeHtml(f.condominio)}`);
+  if (f.dataDDMM) parts.push(`<b>Data:</b> ${escapeHtml(f.dataDDMM)}${f.ano ? '.' + escapeHtml(f.ano) : ''}`);
+  else if (f.data) parts.push(`<b>Data:</b> ${escapeHtml(f.data)}`);
+  else if (f.mesAno) parts.push(`<b>Mês/Ano:</b> ${escapeHtml(f.mesAno)}`);
+  else if (f.mes || f.ano) parts.push(`<b>Mês/Ano:</b> ${escapeHtml(f.mes || '?')} ${escapeHtml(f.ano || '')}`);
+  else if (f.mesCompleto || f.ano) parts.push(`<b>Mês/Ano:</b> ${escapeHtml(f.mesCompleto || '?')} ${escapeHtml(f.ano || '')}`);
+  if (f.unidade) parts.push(`<b>Unidade:</b> ${escapeHtml(f.unidade)}`);
+  if (f.categoria) parts.push(`<b>Categoria:</b> ${escapeHtml(f.categoria)}`);
+  if (f.ucSuffix) parts.push(`<b>UC:</b> ...${escapeHtml(f.ucSuffix)}`);
+  if (f.apartamento) parts.push(`<b>Apto:</b> ${escapeHtml(f.apartamento)}`);
+  if (f.numeroProtocolo) parts.push(`<b>Nº Protocolo:</b> ${escapeHtml(f.numeroProtocolo)}`);
+  if (f.observacao) parts.push(`<b>Obs.:</b> ${escapeHtml(f.observacao)}`);
   return parts.join('<br>') || '<span style="opacity:.5">nenhum campo reconhecido</span>';
 }
 
-// Mostra o texto bruto reconhecido (nativo ou OCR) para o usuário conferir por que a identificação falhou/ficou incerta.
 function ocrTextDetails(row){
   if (!row.ocrText || !row.ocrText.trim()) return '';
   const preview = row.ocrText.trim().slice(0, 600);
   return `<details class="ocrDetails"><summary>ver texto reconhecido</summary><pre>${escapeHtml(preview)}</pre></details>`;
 }
 
-// Botão "ver arquivo": abre o PDF original numa aba nova pra conferência visual antes de renomear.
-// Só cria a URL do blob na hora do clique (não guarda uma por linha o tempo todo).
 function verArquivoBtn(row){
   if (!row.originalFile) return '';
-  return `<button type="button" class="linkBtn verArquivoBtn" data-id="${row.id}">📄 ver arquivo</button>`;
+  return `<button type="button" class="linkBtn verArquivoBtn" data-id="${row.id}">📄 ver</button>`;
 }
 
-// Botão "confirmar": pro caso comum de o OCR ter acertado o nome mas ficado com confiança baixa (ex.: 60%)
-// por causa da qualidade da digitalização — em vez de precisar reescrever o mesmo texto no campo só pra
-// "forçar" a confirmação, um clique já marca como 100% confiável.
+function baixarUmBtn(row){
+  if (!row.originalFile || row.status === 'processing') return '';
+  return `<button type="button" class="linkBtn baixarUmBtn" data-id="${row.id}">⬇ baixar</button>`;
+}
+
+function editarBtn(row){
+  return `<button type="button" class="linkBtn editarBtn" data-id="${row.id}">✏ editar</button>`;
+}
+
+function removerBtn(row){
+  if (row.status === 'processing') return '';
+  return `<button type="button" class="linkBtn danger removerBtn" data-id="${row.id}">✕ remover</button>`;
+}
+
 function confirmarBtn(row){
   return `<button type="button" class="linkBtn confirmarBtn" data-id="${row.id}">✓ confirmar</button>`;
 }
 
-// Marca a linha como confirmada (100% de confiança) e reordena a tabela: linhas prontas descem pro fim,
-// deixando só o que ainda precisa de atenção no topo.
+function ensinarBtn(row){
+  return `<button type="button" class="linkBtn ensinarBtn" data-id="${row.id}">🎓 ensinar condomínio</button>`;
+}
+
 function confirmarLinha(row){
   row.confidence = 1;
   row.status = 'ok';
   row.manualEdit = true;
+  row.editing = false;
   renderRow(row);
   reorderTable();
+  applyFilters();
 }
 
-// Reordena as linhas na tela: o que ainda precisa de revisão (baixa confiança/não identificado/erro/em
-// processamento) sobe pro topo; o que já está pronto (alta confiança ou confirmado) desce pro fim. Só
-// move os elementos existentes — não recria nada, então não perde o estado dos inputs/detalhes abertos.
-export function reorderTable(){
+function downloadSingleFile(row){
+  if (!row.originalFile) return;
+  const url = URL.createObjectURL(row.originalFile);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = row.suggestedName || row.originalName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function reorderTable(){
   const pendentes = items.filter(i => i.status !== 'ok');
   const prontos = items.filter(i => i.status === 'ok');
   for (const r of [...pendentes, ...prontos]){
@@ -207,14 +412,7 @@ export function reorderTable(){
   }
 }
 
-// Botão "ensinar condomínio": só aparece em linhas de baixa confiança/não identificadas. Deixa o usuário
-// confirmar manualmente qual é o condomínio; a partir daí o nome fica salvo (localStorage, só nesta
-// máquina) e passa a ser reconhecido automaticamente nos próximos documentos — inclusive em lotes futuros.
-function ensinarBtn(row){
-  return `<button type="button" class="linkBtn ensinarBtn" data-id="${row.id}">🎓 ensinar condomínio</button>`;
-}
-
-export function renderRow(row){
+function renderRow(row){
   let tr = document.getElementById('row-' + row.id);
   if (!tr){
     tr = document.createElement('tr');
@@ -228,33 +426,44 @@ export function renderRow(row){
     nameCell = `<span class="orig">processando...</span>`;
   } else if (row.status === 'error'){
     badge = `<span class="badge err">✕ ERRO</span>`;
-    nameCell = `<div class="status">${escapeHtml(row.error||'falha ao processar')}</div>
+    nameCell = `<div class="status">${escapeHtml(row.error || 'falha ao processar')}</div>
       <input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
-      <div class="rowActions">${verArquivoBtn(row)}</div>`;
+      <div class="rowActions">${verArquivoBtn(row)}${removerBtn(row)}</div>`;
   } else if (row.status === 'unidentified'){
     badge = `<span class="badge low">⚠ NÃO IDENTIFICADO</span>`;
     nameCell = `<div class="status">Não foi possível determinar tipo/data automaticamente.</div>
       <input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
-      <div class="rowActions">${verArquivoBtn(row)}${ensinarBtn(row)}</div>
+      <div class="rowActions">${verArquivoBtn(row)}${ensinarBtn(row)}${baixarUmBtn(row)}${removerBtn(row)}</div>
       ${ocrTextDetails(row)}`;
   } else if (row.status === 'low'){
-    badge = `<span class="badge low">⚠ CONFERIR (${Math.round(row.confidence*100)}%)</span>`;
+    badge = `<span class="badge low">⚠ CONFERIR (${Math.round(row.confidence * 100)}%)</span>`;
     nameCell = `<input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
-      <div class="rowActions">${confirmarBtn(row)}${verArquivoBtn(row)}${ensinarBtn(row)}</div>
+      <div class="rowActions">${confirmarBtn(row)}${verArquivoBtn(row)}${ensinarBtn(row)}${baixarUmBtn(row)}${removerBtn(row)}</div>
       ${ocrTextDetails(row)}`;
   } else {
     badge = row.merged
       ? `<span class="badge high">🔗 PDF UNIDO</span>`
       : row.manualEdit
-        ? `<span class="badge high">✓ CONFIRMADO MANUALMENTE (100%)</span>`
-        : `<span class="badge high">✓ ALTA CONFIANÇA (${Math.round(row.confidence*100)}%)</span>`;
-    nameCell = `<div class="name">${escapeHtml(row.suggestedName)}</div>
-      <div class="rowActions">${verArquivoBtn(row)}</div>`;
+        ? `<span class="badge high">✓ CONFIRMADO (100%)</span>`
+        : `<span class="badge high">✓ ALTA CONFIANÇA (${Math.round(row.confidence * 100)}%)</span>`;
+    if (row.editing){
+      nameCell = `<input class="nameInput" data-id="${row.id}" value="${escapeAttr(row.suggestedName)}">
+        <div class="rowActions">${verArquivoBtn(row)}${baixarUmBtn(row)}${removerBtn(row)}</div>`;
+    } else {
+      nameCell = `<div class="name">${escapeHtml(row.suggestedName)}</div>
+        <div class="rowActions">${editarBtn(row)}${verArquivoBtn(row)}${baixarUmBtn(row)}${removerBtn(row)}</div>`;
+    }
   }
 
   const origCell = row.merged
     ? `<div class="orig">Unido de:<br>${row.mergedFrom.map(n => escapeHtml(n)).join('<br>')}</div>`
-    : `<div class="orig">${escapeHtml(row.originalName)}</div>${row.usedOCR ? `<div class="status">via OCR${row.rotationUsed ? ' · girado '+row.rotationUsed+'°' : ''}${row.ocrConfidencePct != null ? ' · conf. '+row.ocrConfidencePct+'%' : ''}${row.reviewed ? ' · revisado' : ''}</div>` : row.usedAI ? `<div class="status">via IA${row.reviewed ? ' · revisado' : ''}</div>` : ''}`;
+    : `<div class="orig">${escapeHtml(row.originalName)}</div>${
+      row.usedOCR
+        ? `<div class="status">via OCR${row.rotationUsed ? ' · girado ' + row.rotationUsed + '°' : ''}${row.ocrConfidencePct != null ? ' · conf. ' + row.ocrConfidencePct + '%' : ''}${row.reviewed ? ' · revisado' : ''}</div>`
+        : row.usedAI
+          ? `<div class="status">via IA${row.reviewed ? ' · revisado' : ''}</div>`
+          : ''
+    }`;
 
   const podeSelecionarParaJuncao = row.status !== 'processing';
   const checkboxCell = podeSelecionarParaJuncao
@@ -270,24 +479,42 @@ export function renderRow(row){
   `;
 
   const verBtn = tr.querySelector('.verArquivoBtn');
-  if (verBtn){
-    verBtn.addEventListener('click', () => {
-      const url = URL.createObjectURL(row.originalFile);
-      window.open(url, '_blank');
+  if (verBtn) verBtn.addEventListener('click', () => openPreview(row));
+
+  const baixarBtn = tr.querySelector('.baixarUmBtn');
+  if (baixarBtn) baixarBtn.addEventListener('click', () => downloadSingleFile(row));
+
+  const editBtn = tr.querySelector('.editarBtn');
+  if (editBtn){
+    editBtn.addEventListener('click', () => {
+      row.editing = true;
+      renderRow(row);
+      const inp = document.querySelector(`#row-${row.id} .nameInput`);
+      if (inp){ inp.focus(); inp.select(); }
+    });
+  }
+
+  const remBtn = tr.querySelector('.removerBtn');
+  if (remBtn){
+    remBtn.addEventListener('click', () => {
+      removeItemById(row.id);
+      tr.remove();
+      renderMergePanel();
+      if (items.length === 0){
+        resultsTable.style.display = 'none';
+        filterBar.style.display = 'none';
+        actionsBar.style.display = 'none';
+        empty.style.display = 'block';
+      }
+      updateCount();
     });
   }
 
   const ensinarBtnEl = tr.querySelector('.ensinarBtn');
-  if (ensinarBtnEl){
-    ensinarBtnEl.addEventListener('click', () => ensinarCondominio(row));
-  }
+  if (ensinarBtnEl) ensinarBtnEl.addEventListener('click', () => ensinarCondominio(row));
 
   const confirmarBtnEl = tr.querySelector('.confirmarBtn');
-  if (confirmarBtnEl){
-    // Cobre o caso do OCR ter acertado o nome mas ficado com confiança baixa (ex.: 60%) por causa da
-    // qualidade da digitalização — confirma sem precisar reescrever o mesmo texto no campo.
-    confirmarBtnEl.addEventListener('click', () => confirmarLinha(row));
-  }
+  if (confirmarBtnEl) confirmarBtnEl.addEventListener('click', () => confirmarLinha(row));
 
   const mergeCheckbox = tr.querySelector('.mergeCheckbox');
   if (mergeCheckbox){
@@ -296,42 +523,51 @@ export function renderRow(row){
 
   const input = tr.querySelector('.nameInput');
   if (input){
-    // Se o usuário digitou o nome à mão (em vez de aceitar a sugestão), considera confirmado: 100% de
-    // confiança, badge de alta confiança e sai da fila do botão "revisar baixa confiança".
-    input.addEventListener('change', () => {
+    const commitEdit = () => {
       const r = items.find(i => i.id === row.id);
-      let val = input.value.trim();
-      if (!val.toLowerCase().endsWith('.pdf')) val += '.pdf';
-      if (r.suggestedName) usedNames.delete(r.suggestedName.toUpperCase());
-      usedNames.add(val.toUpperCase());
-      r.suggestedName = val;
+      if (!r) return;
+      const val = input.value.trim();
+      if (!val){
+        r.editing = false;
+        renderRow(r);
+        return;
+      }
+      r.suggestedName = replaceReservedName(r.suggestedName, val);
       confirmarLinha(r);
+    };
+    input.addEventListener('change', commitEdit);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter'){ e.preventDefault(); input.blur(); }
+      else if (e.key === 'Escape' && row.editing){
+        row.editing = false;
+        renderRow(row);
+      }
     });
   }
+
+  applyFilters();
   updateCount();
 }
 
-// Reaplica identifyDocument numa linha já processada (usado depois de "ensinar condomínio"), preservando
-// o texto/confiança de OCR já extraídos — só a etapa de reconhecimento de campos é refeita.
+/* ============================================================
+   ENSINAR CONDOMÍNIO & REPROCESSAMENTO
+   ============================================================ */
+
 function reprocessarLinha(row){
   if (!row.ocrText) return false;
   const ocrConfidence = row.ocrConfidencePct != null ? row.ocrConfidencePct / 100 : null;
   const result = identifyDocument(row.ocrText, ocrConfidence);
   if (!result.nome) return false;
 
-  if (row.suggestedName) usedNames.delete(row.suggestedName.toUpperCase());
+  releaseName(row.suggestedName);
   row.fields = result.fields;
   row.ruleId = result.ruleId;
-  row.suggestedName = uniqueName(result.nome) + '.pdf';
+  row.suggestedName = reserveUniqueName(result.nome);
   row.confidence = result.confidence;
   row.status = result.confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
   return true;
 }
 
-// Fluxo de "ensinar condomínio": pede confirmação do nome (sugerindo o que o fallback de cabeçalho
-// encontrou, se encontrou algo), salva no whitelist aprendido e tenta reidentificar esta linha e
-// qualquer outra do lote atual que ainda esteja pendente — é comum vários documentos do mesmo condomínio
-// aparecerem juntos no mesmo lote de digitalização.
 function ensinarCondominio(row){
   const raw = row.ocrText || '';
   const sugestao = findCondominioFallback(raw) || '';
@@ -339,7 +575,7 @@ function ensinarCondominio(row){
     'Nome do condomínio como deve aparecer no nome do arquivo (ex.: ARQUIPELAGO DO SOL):',
     sugestao
   );
-  if (nome === null) return; // cancelou
+  if (nome === null) return;
   const nomeLimpo = nome.trim();
   if (!nomeLimpo) return;
 
@@ -355,39 +591,44 @@ function ensinarCondominio(row){
       renderRow(r);
     }
   }
-  if (melhoradas) reorderTable();
+  if (melhoradas){
+    reorderTable();
+    applyFilters();
+  }
 
   alert(`"${nomeLimpo.toUpperCase()}" salvo. Documentos futuros com esse nome no cabeçalho serão reconhecidos automaticamente (inclusive em lotes futuros neste computador).${melhoradas ? `\n\n${melhoradas} documento(s) deste lote foram reidentificados agora.` : ''}`);
 }
 
 function reviewableRows(){
-  // Documentos que passaram por OCR local OU por IA, ficaram abaixo do limiar de confiança e ainda não
-  // foram revisados (a revisão é determinística o bastante — rodar de novo no mesmo arquivo raramente muda
-  // o resultado sozinha, então não repete automaticamente).
   return items.filter(i => i.status !== 'processing' && (i.usedOCR || i.usedAI) && !i.reviewed && (i.status === 'low' || i.status === 'unidentified'));
 }
 
-export function updateCount(){
+function updateCount(){
+  const total = items.length;
+  const okCount = items.filter(i => i.status === 'ok').length;
+  const pendingCount = items.filter(i => i.status !== 'ok').length;
   const doneCount = items.filter(i => i.status !== 'processing').length;
-  countEl.textContent = `${doneCount} de ${items.length} documento(s) prontos`;
+
+  countAllEl.textContent = String(total);
+  countPendingEl.textContent = String(pendingCount);
+  countOkEl.textContent = String(okCount);
+
+  countEl.textContent = `${okCount} pronto(s) · ${pendingCount} pendente(s) (${doneCount}/${total} lidos)`;
   downloadBtn.disabled = doneCount === 0;
 
-  const pending = reviewableRows();
-  if (pending.length > 0){
+  const pendingReview = reviewableRows();
+  if (pendingReview.length > 0){
     reviewBtn.style.display = 'inline-block';
-    reviewBtn.textContent = `REVISAR BAIXA CONFIANÇA (${pending.length})`;
+    reviewBtn.textContent = `REVISAR BAIXA CONFIANÇA (${pendingReview.length})`;
   } else {
     reviewBtn.style.display = 'none';
   }
 }
 
-export function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-function escapeAttr(s){ return escapeHtml(s); }
+/* ============================================================
+   REVISÃO PROFUNDA, DOWNLOAD ZIP & NOVO LOTE
+   ============================================================ */
 
-// Revisão manual, sob demanda, só dos documentos que ficaram abaixo de 70% de confiança (ou não identificados)
-// e vieram de OCR. É mais lenta de propósito (testa mais combinações) — por isso fica fora do fluxo automático.
 reviewBtn.addEventListener('click', async () => {
   const pending = reviewableRows();
   if (!pending.length) return;
@@ -403,37 +644,31 @@ reviewBtn.addEventListener('click', async () => {
   progressFill.style.width = '0%';
 
   for (const row of pending){
-    // Guarda o status de ANTES da revisão — é o valor certo pra voltar se a revisão não melhorar nada.
-    // Bug corrigido (13/ago): o código antigo usava `row.suggestedName ? 'low' : 'unidentified'` pra decidir
-    // isso, mas suggestedName está SEMPRE preenchido (até documento nunca identificado ganha o nome do
-    // arquivo original como sugestão) — então toda revisão sem melhora virava '⚠ CONFERIR (0%)' mesmo
-    // quando o documento continuava, de fato, não identificado.
     const statusAntesDaRevisao = row.status;
     row.status = 'processing';
     renderRow(row);
     try {
-      const improved = await reviewDocument(row);
-      if (improved && improved.result.nome){
-        // libera o nome antigo (se ele tinha reservado um) antes de reservar o novo
-        if (row.suggestedName) usedNames.delete(row.suggestedName.toUpperCase());
+      const improved = await reviewDocumentSmart(row);
+      if (improved && improved.result && improved.result.nome){
+        releaseName(row.suggestedName);
         row.ocrText = improved.text;
-        row.ocrConfidencePct = Math.round(improved.ocrConfidence * 100);
+        row.ocrConfidencePct = improved.ocrConfidence != null ? Math.round(improved.ocrConfidence * 100) : null;
         row.rotationUsed = improved.rotationUsed;
+        if (improved.usedAI) row.usedAI = true;
+        else row.usedOCR = true;
         row.fields = improved.result.fields;
         row.ruleId = improved.result.ruleId;
-        row.suggestedName = uniqueName(improved.result.nome) + '.pdf';
+        row.suggestedName = reserveUniqueName(improved.result.nome);
         row.confidence = improved.result.confidence;
         row.status = improved.result.confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
         row.reviewed = true;
       } else if (improved){
-        // revisão rodou mas não conseguiu identificar nada melhor — mantém o nome anterior editável
         row.ocrText = improved.text;
-        row.ocrConfidencePct = Math.round(improved.ocrConfidence * 100);
+        row.ocrConfidencePct = improved.ocrConfidence != null ? Math.round(improved.ocrConfidence * 100) : null;
         row.rotationUsed = improved.rotationUsed;
         row.reviewed = true;
         row.status = statusAntesDaRevisao;
       } else {
-        // texto nativo (não veio de OCR) — nada a revisar
         row.reviewed = true;
         row.status = statusAntesDaRevisao;
       }
@@ -444,60 +679,63 @@ reviewBtn.addEventListener('click', async () => {
     }
     done++;
     progressLabel.textContent = `Revisando ${done} de ${total} documento(s) de baixa confiança...`;
-    progressFill.style.width = Math.round((done/total)*100) + '%';
+    progressFill.style.width = Math.round((done / total) * 100) + '%';
     renderRow(row);
   }
 
   progressLabel.textContent = `Revisão concluída: ${total} documento(s) reprocessado(s).`;
   reorderTable();
+  applyFilters();
   reviewBtn.disabled = false;
   clearBtn.disabled = false;
   downloadBtn.disabled = false;
   updateCount();
+  updateAiStatusButton();
 });
 
 downloadBtn.addEventListener('click', async () => {
   downloadBtn.disabled = true;
   downloadBtn.textContent = 'GERANDO ZIP...';
-  const zip = new JSZip();
-  for (const row of items){
-    if (row.status === 'processing') continue;
-    zip.file(row.suggestedName, row.originalFile);
+  try {
+    const zip = new JSZip();
+    for (const row of items){
+      if (row.status === 'processing') continue;
+      zip.file(row.suggestedName, row.originalFile);
+    }
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'documentos_renomeados.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } finally {
+    downloadBtn.disabled = false;
+    downloadBtn.textContent = 'BAIXAR TODOS (.ZIP)';
   }
-  const blob = await zip.generateAsync({ type: 'blob' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'documentos_renomeados.zip';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  downloadBtn.disabled = false;
-  downloadBtn.textContent = 'BAIXAR TODOS (.ZIP)';
 });
 
-// Fecha o lote atual: limpa a lista pra você começar um lote novo sem misturar com o que já foi baixado.
-// Útil quando você digitaliza em levas grandes (ex.: 150 documentos) mas prefere processar/conferir em
-// partes — depois de baixar o ZIP de uma parte, clique aqui antes de arrastar a próxima leva.
 clearBtn.addEventListener('click', () => {
   if (items.length && !confirm('Limpar a lista atual? Isso não apaga o ZIP já baixado, só reseta a tela para um novo lote.')) return;
-  items = [];
-  usedNames = new Set();
+  closePreview();
+  clearAllState();
+  clearMergeQueue();
   resultsBody.innerHTML = '';
   resultsTable.style.display = 'none';
+  filterBar.style.display = 'none';
   actionsBar.style.display = 'none';
   progressWrap.style.display = 'none';
   empty.style.display = 'block';
+  if (searchInput) searchInput.value = '';
+  activeFilter = 'all';
+  document.querySelectorAll('.filterBtn').forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
+  updateCount();
 });
 
 /* ============================================================
    EXPORTAR/IMPORTAR APRENDIZADO DE CONDOMÍNIOS
-   ============================================================
-   O aprendizado (botão "🎓 ensinar condomínio") fica salvo no localStorage, que é isolado por origem —
-   ou seja, rodando o app localmente (file://) e depois hospedado (ex.: GitHub Pages, https://...) são
-   dois "bancos" separados na visão do navegador. Esses dois botões deixam levar a lista aprendida de um
-   ambiente pro outro (ou pra outro computador/navegador) via um arquivo .json.
    ============================================================ */
 
 function updateLearnCount(){
@@ -507,9 +745,6 @@ function updateLearnCount(){
     : `${n} condomínio(s) aprendido(s) manualmente (salvos neste navegador).`;
 }
 
-// Preenche o dropdown "este lote é de um condomínio só?" com a whitelist + os aprendidos, em ordem
-// alfabética. Preserva a seleção atual (se ainda existir na lista) para não perder a escolha do usuário
-// quando isso é chamado de novo depois de aprender um condomínio novo no meio do lote.
 function preencherLoteCondominioSelect(){
   if (!loteCondominioSelect) return;
   const selecaoAtual = loteCondominioSelect.value;
@@ -532,7 +767,7 @@ exportLearnBtn.addEventListener('click', () => {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
 importLearnBtn.addEventListener('click', () => importLearnInput.click());
@@ -546,7 +781,7 @@ importLearnInput.addEventListener('change', async () => {
   try {
     const text = await file.text();
     parsed = JSON.parse(text);
-  } catch(e){
+  } catch {
     alert('Não consegui ler esse arquivo como JSON válido. Ele precisa ser um arquivo exportado por este mesmo app.');
     return;
   }
@@ -555,7 +790,6 @@ importLearnInput.addEventListener('change', async () => {
     return;
   }
 
-  // Mescla com o que já existe (não substitui): mesmo nome de condomínio soma aliases em vez de duplicar.
   let novos = 0, aliasesSomados = 0;
   for (const entry of parsed){
     if (!entry || typeof entry.nome !== 'string') continue;
@@ -580,15 +814,20 @@ importLearnInput.addEventListener('change', async () => {
   updateLearnCount();
   preencherLoteCondominioSelect();
 
-  // Se já houver documentos pendentes na tela, tenta reidentificar com o aprendizado recém-importado.
   let melhoradas = 0;
   for (const r of items){
     if (r.status !== 'low' && r.status !== 'unidentified') continue;
     if (reprocessarLinha(r)){ melhoradas++; renderRow(r); }
   }
-  if (melhoradas) reorderTable();
+  if (melhoradas){
+    reorderTable();
+    applyFilters();
+  }
 
   alert(`Importado: ${novos} condomínio(s) novo(s), ${aliasesSomados} apelido(s) somado(s) aos existentes.${melhoradas ? `\n${melhoradas} documento(s) pendente(s) nesta tela foram reidentificados agora.` : ''}`);
 });
 
+// Inicialização da página
 updateLearnCount();
+preencherLoteCondominioSelect();
+updateAiStatusButton();

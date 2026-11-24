@@ -1,32 +1,84 @@
 // ai-extraction.js
-// Tier 2: extração via IA — fallback inteligente pra tudo que DOCUMENT_TYPES/CONDOMINIOS (Tier 1, motor de
-// regras local) não cobre.
-//
-// O motor de regras é rápido e grátis, mas é fechado: só reconhece os tipos/condomínios que já foram
-// ensinados nele manualmente. Em vez de continuar ampliando regex pra cada caso novo, qualquer documento
-// que o motor de regras não resolver com confiança suficiente é mandado, como imagem, pra um backend
-// serverless que chama a Claude API (visão) e devolve a extração já estruturada — generaliza pra
-// condomínio/tipo de documento nunca visto sem precisar editar código.
-//
-// Import circular com ocr-pipeline.js: identifyDocumentSmart() usa renderPageToCanvas/extractPdfText de lá
-// (Tier 3, caminho normal e fallback final); reviewDocument() de lá chama extractWithAI() daqui de volta.
-// Seguro pelo mesmo motivo do ciclo config.js/rules-engine.js — ver comentário lá.
-import { AI_SECRET_STORAGE_KEY, AI_EXTRACT_ENDPOINT, MIN_TEXT_LEN_TO_SKIP_OCR, CONFIDENCE_THRESHOLD } from './config.js';
-import { identifyDocument, findExtras } from './rules-engine.js';
-import { renderPageToCanvas, extractPdfText } from './ocr-pipeline.js';
+// Tier 2 (IA) + orquestrador principal Tier 1 (regras locais) -> Tier 2 (Claude Vision via proxy) -> Tier 3 (OCR local).
+// Sem import circular: este módulo importa ocr-pipeline.js, pdf-utils.js, rules-engine.js e state.js;
+// nenhum deles importa este módulo de volta.
+import {
+  AI_SECRET_STORAGE_KEY,
+  AI_ENABLED_STORAGE_KEY,
+  AI_ENDPOINT_STORAGE_KEY,
+  AI_EXTRACT_ENDPOINT,
+  MIN_TEXT_LEN_TO_SKIP_OCR,
+  CONFIDENCE_THRESHOLD,
+} from './config.js';
+import { identifyDocument, findExtras, findCondominio, normalize } from './rules-engine.js';
+import { ocrFromCanvas, ocrDeepReviewDocument, preprocessCanvasForOCR } from './ocr-pipeline.js';
+import { openPdfDocument, extractNativeTextFromPdf, renderPageToCanvas, releaseCanvas, sanitizeFilename } from './pdf-utils.js';
+import { getLoteCondominio } from './state.js';
 
-// Pede a chave de acesso do backend uma única vez e guarda em localStorage (nunca é a chave da Anthropic —
-// é só um segredo compartilhado entre este front-end e o proxy serverless, pra evitar uso por terceiros).
-function getAiSecret(){
-  let secret = localStorage.getItem(AI_SECRET_STORAGE_KEY);
-  if (!secret){
-    secret = window.prompt('Cole a chave de acesso do backend de IA:');
-    if (secret) localStorage.setItem(AI_SECRET_STORAGE_KEY, secret.trim());
+const AI_FETCH_TIMEOUT_MS = 28_000;
+
+/* ============================================================
+   CONFIGURAÇÃO DA IA (sem prompt() intrusivo no meio do lote)
+   ============================================================ */
+
+export function getAiSecret(){
+  try {
+    const s = localStorage.getItem(AI_SECRET_STORAGE_KEY);
+    return s ? s.trim() : null;
+  } catch {
+    return null;
   }
-  return secret ? secret.trim() : null;
 }
 
-function canvasToBase64Jpeg(canvas, quality){
+export function setAiSecret(secret){
+  const clean = String(secret || '').trim();
+  try {
+    if (clean) localStorage.setItem(AI_SECRET_STORAGE_KEY, clean);
+    else localStorage.removeItem(AI_SECRET_STORAGE_KEY);
+  } catch { /* localStorage indisponível */ }
+}
+
+export function getAiEndpoint(){
+  try {
+    const custom = localStorage.getItem(AI_ENDPOINT_STORAGE_KEY);
+    if (custom && custom.trim()) return custom.trim();
+  } catch { /* fallback padrão */ }
+  return AI_EXTRACT_ENDPOINT;
+}
+
+export function setAiEndpoint(url){
+  const clean = String(url || '').trim();
+  try {
+    if (clean) localStorage.setItem(AI_ENDPOINT_STORAGE_KEY, clean);
+    else localStorage.removeItem(AI_ENDPOINT_STORAGE_KEY);
+  } catch { /* localStorage indisponível */ }
+}
+
+export function isAiEnabled(){
+  try {
+    const raw = localStorage.getItem(AI_ENABLED_STORAGE_KEY);
+    if (raw === null) return Boolean(getAiSecret()); // se tem chave salva, vem ligada por padrão
+    return raw === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function setAiEnabled(enabled){
+  try {
+    localStorage.setItem(AI_ENABLED_STORAGE_KEY, enabled ? '1' : '0');
+  } catch { /* localStorage indisponível */ }
+}
+
+export function isAiReady(){
+  return isAiEnabled() && Boolean(getAiSecret());
+}
+
+/* ============================================================
+   CLIENTE HTTP DO PROXY DE IA
+   ============================================================ */
+
+function canvasToBase64Jpeg(canvas, quality = 0.85){
   return new Promise((resolve, reject) => {
     canvas.toBlob(blob => {
       if (!blob) return reject(new Error('canvas_to_blob_failed'));
@@ -34,80 +86,157 @@ function canvasToBase64Jpeg(canvas, quality){
       reader.onloadend = () => resolve(String(reader.result).split(',')[1]);
       reader.onerror = () => reject(reader.error || new Error('file_reader_failed'));
       reader.readAsDataURL(blob);
-    }, 'image/jpeg', quality || 0.85);
+    }, 'image/jpeg', quality);
   });
 }
 
-// Chama o proxy serverless (api/extract.js) com a página renderizada como imagem. Lança erro em qualquer
-// falha (sem chave, sem rede, backend fora do ar) — quem chama decide o fallback (ver identifyDocumentSmart).
-export async function extractWithAI(canvas, { hint } = {}){
+function buildAiResult(ai, nativeText){
+  const rawCondo = ai.condominio ? String(ai.condominio).trim() : null;
+  const canonicalCondo = rawCondo ? (findCondominio(normalize(rawCondo)) || rawCondo.toUpperCase()) : undefined;
+  const cleanName = sanitizeFilename(ai.nome_sugerido);
+
+  return {
+    nome: cleanName,
+    confidence: typeof ai.confidence === 'number' ? Math.max(0, Math.min(1, ai.confidence)) : 0.85,
+    ruleId: 'ai:' + (ai.tipo_documento || 'desconhecido'),
+    fields: {
+      ...findExtras(nativeText || ''),
+      tipo: ai.tipo_documento ? String(ai.tipo_documento).replace(/_/g, ' ').toUpperCase() : undefined,
+      condominio: canonicalCondo,
+      data: ai.data || undefined,
+      mesAno: ai.mes_ano || undefined,
+      unidade: ai.unidade || undefined,
+      categoria: ai.categoria || undefined,
+      observacao: ai.observacao || undefined,
+    },
+    text: (nativeText && nativeText.trim()) || '[PDF só-imagem — extraído via IA]',
+    usedOCR: false,
+    usedAI: true,
+  };
+}
+
+export async function extractWithAI(canvas, { hint, loteCondominio } = {}){
   const secret = getAiSecret();
   if (!secret) throw new Error('ai_secret_not_configured');
+
   const image = await canvasToBase64Jpeg(canvas, 0.85);
-  const res = await fetch(AI_EXTRACT_ENDPOINT, {
+  const signal = (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+    ? AbortSignal.timeout(AI_FETCH_TIMEOUT_MS)
+    : undefined;
+
+  const res = await fetch(getAiEndpoint(), {
     method: 'POST',
+    signal,
     headers: { 'content-type': 'application/json', 'x-renomeador-secret': secret },
-    body: JSON.stringify({ image, mimeType: 'image/jpeg', hint }),
+    body: JSON.stringify({
+      image,
+      mimeType: 'image/jpeg',
+      hint: hint || undefined,
+      loteCondominio: loteCondominio || undefined,
+    }),
   });
+
   if (res.status === 401){
-    // chave errada/expirada — some com ela pra não insistir com a mesma chave em todos os próximos arquivos
-    localStorage.removeItem(AI_SECRET_STORAGE_KEY);
+    // Chave errada/expirada — remove pra não insistir nos próximos arquivos do lote
+    setAiSecret('');
     throw new Error('ai_unauthorized');
   }
   if (!res.ok) throw new Error(`ai_http_${res.status}`);
   return res.json();
 }
 
-// Orquestrador principal: tenta o motor de regras local (grátis, instantâneo) primeiro; só recorre à IA
-// quando o texto nativo não existe/não basta ou o motor de regras não reconheceu nada com confiança
-// suficiente; se a IA falhar (rede, sem chave), cai pro pipeline antigo de OCR local + regras como último
-// recurso, pra o app nunca ficar completamente sem funcionar.
+/* ============================================================
+   ORQUESTRAÇÃO: TIER 1 (REGRAS) -> TIER 2 (IA) -> TIER 3 (OCR)
+   ============================================================ */
+
 export async function identifyDocumentSmart(file){
-  const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-  let nativeText = '';
-  const maxPages = Math.min(pdf.numPages, 3);
-  for (let i = 1; i <= maxPages; i++){
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    nativeText += content.items.map(it => it.str).join(' ') + '\n';
-  }
-  const hasNativeText = nativeText.trim().length >= MIN_TEXT_LEN_TO_SKIP_OCR;
-
-  if (hasNativeText){
-    const local = identifyDocument(nativeText, null);
-    if (local.nome && local.confidence >= CONFIDENCE_THRESHOLD){
-      return { ...local, text: nativeText, usedOCR: false, usedAI: false };
-    }
-  }
-
+  const pdf = await openPdfDocument(file);
   try {
+    const nativeText = await extractNativeTextFromPdf(pdf, 3);
+    const hasNativeText = nativeText.trim().length >= MIN_TEXT_LEN_TO_SKIP_OCR;
+    let localFromNative = null;
+
+    if (hasNativeText){
+      localFromNative = identifyDocument(nativeText, null);
+      if (localFromNative.nome && localFromNative.confidence >= CONFIDENCE_THRESHOLD){
+        return { ...localFromNative, text: nativeText, usedOCR: false, usedAI: false };
+      }
+    }
+
     const page1 = await pdf.getPage(1);
     const canvas = await renderPageToCanvas(page1, 2.5);
-    const ai = await extractWithAI(canvas);
-    canvas.remove();
-    if (ai && ai.nome_sugerido){
-      return {
-        nome: ai.nome_sugerido,
-        confidence: typeof ai.confidence === 'number' ? ai.confidence : 0.85,
-        ruleId: 'ai:' + (ai.tipo_documento || 'desconhecido'),
-        fields: {
-          ...findExtras(nativeText),
-          condominio: ai.condominio || undefined,
-          data: ai.data || undefined,
-          unidade: ai.unidade || undefined,
-          categoria: ai.categoria || undefined,
-        },
-        text: nativeText.trim() || '[PDF só-imagem — extraído via IA]',
-        usedOCR: false,
-        usedAI: true,
-      };
+    try {
+      if (isAiReady()){
+        try {
+          const ai = await extractWithAI(canvas, { loteCondominio: getLoteCondominio() });
+          if (ai && ai.nome_sugerido){
+            return buildAiResult(ai, nativeText);
+          }
+        } catch (err){
+          console.warn('Extração via IA falhou, caindo pro OCR local:', err);
+        }
+      }
+
+      // Se o PDF já tinha texto nativo (só não atingiu confiança alta na Tier 1 e a IA não resolveu),
+      // não desperdiça tempo fazendo OCR em cima de texto já pesquisável.
+      if (hasNativeText && localFromNative){
+        return { ...localFromNative, text: nativeText, usedOCR: false, usedAI: false };
+      }
+
+      // Reaproveita o MESMO canvas já renderizado (evita abrir/parsear o PDF novamente).
+      const ocr = await ocrFromCanvas(canvas, { alreadyPreprocessed: false });
+      const result = identifyDocument(ocr.text, ocr.ocrConfidence);
+      return { ...result, text: ocr.text, usedOCR: true, usedAI: false, rotationUsed: ocr.rotationUsed };
+    } finally {
+      releaseCanvas(canvas);
     }
-  } catch (err){
-    console.warn('Extração via IA falhou, caindo pro OCR local:', err);
+  } finally {
+    await pdf.destroy();
+  }
+}
+
+// Revisão sob demanda para documentos com baixa confiança / não identificados:
+// tenta IA em resolução maior (3.5x) primeiro se configurada; senão (ou se falhar), roda OCR profundo local.
+export async function reviewDocumentSmart(row){
+  if (!row.usedOCR && !row.usedAI){
+    return null; // texto nativo já foi lido sem erro de OCR
   }
 
-  const { text, ocrConfidence, usedOCR, rotationUsed } = await extractPdfText(file);
-  const result = identifyDocument(text, ocrConfidence);
-  return { ...result, text, usedOCR, usedAI: false, rotationUsed };
+  if (isAiReady()){
+    const pdf = await openPdfDocument(row.originalFile);
+    try {
+      const page1 = await pdf.getPage(1);
+      const canvasAI = await renderPageToCanvas(page1, 3.5);
+      try {
+        preprocessCanvasForOCR(canvasAI);
+        const ai = await extractWithAI(canvasAI, {
+          hint: 'baixa_confianca_revisar_com_cuidado_inclusive_rotacao_e_condominio',
+          loteCondominio: getLoteCondominio(),
+        });
+        if (ai && ai.nome_sugerido){
+          const built = buildAiResult(ai, row.ocrText);
+          return {
+            text: row.ocrText || built.text,
+            ocrConfidence: built.confidence,
+            usedAI: true,
+            result: {
+              nome: built.nome,
+              confidence: built.confidence,
+              ruleId: built.ruleId,
+              fields: built.fields,
+            },
+          };
+        }
+      } finally {
+        releaseCanvas(canvasAI);
+      }
+    } catch (err){
+      console.warn('Revisão via IA falhou, caindo pro OCR profundo local:', err);
+    } finally {
+      await pdf.destroy();
+    }
+  }
+
+  // Sempre tenta OCR profundo local como último recurso (mesmo se a tentativa original foi via IA).
+  return ocrDeepReviewDocument(row.originalFile);
 }

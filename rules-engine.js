@@ -9,17 +9,15 @@
 // chamados de dentro de closures, nunca durante a avaliação do módulo em si — ver comentário equivalente
 // em config.js.
 import { CONDOMINIOS, DOCUMENT_TYPES, MESES, RULES_SEM_CONDOMINIO, CONFIDENCE_THRESHOLD } from './config.js';
+import { setLoteHintProvider as setSharedLoteHintProvider, getLoteCondominio } from './state.js';
 
-// Dica de condomínio do lote inteiro: quando o usuário sabe de antemão que só está digitalizando documentos
-// de UM condomínio, ele seleciona isso num dropdown antes de soltar os arquivos. Esse motor de regras não
-// deve depender de DOM diretamente (precisa ficar testável em Node isolado) — por isso a UI injeta aqui só
-// uma função que devolve o valor atual, em vez de este módulo ler o elemento `<select>` ele mesmo.
-let loteHintProvider = () => null;
+// Dica de condomínio do lote inteiro: delegada ao state.js pra ser compartilhada entre Tier 1 (regras)
+// e Tier 2 (IA) sem acoplar nenhum dos dois ao DOM.
 export function setLoteHintProvider(fn){
-  loteHintProvider = typeof fn === 'function' ? fn : () => null;
+  setSharedLoteHintProvider(fn);
 }
 function condominioDoLote(){
-  return loteHintProvider() || null;
+  return getLoteCondominio();
 }
 
 /* ============================================================
@@ -116,7 +114,7 @@ export function findCondominio(text){
 // ":" solto (sem espaço antes, ex.: "Seção:" colado no rótulo seguinte) também corta — achado 13/ago num
 // recibo de pagamento de salário: "Departamento: CONDOMINIO CERRO CATEDRAL Seção: PORTEIRO..." só tinha um
 // espaço simples entre o nome e o próximo rótulo, sem símbolo/dígito ali pra disparar as alternativas acima.
-const FIM_NOME_CONDOMINIO = '(?:[\\n\\r]|\\s{2,}|\\s\\d|\\s[^A-Za-zÀ-ÖØ-öø-ÿ0-9\\s]|:|$|\\.|,|-|—)';
+const FIM_NOME_CONDOMINIO = '(?:[\\n\\r]|\\s{2,}|\\s\\d|\\s[^A-Za-zÀ-ÖØ-öø-ÿ0-9\\s]|\\s+[A-Za-zÀ-ÖØ-öø-ÿ]{2,20}:|:|$|\\.|,|-|—)';
 
 // Lista de rótulos que costumam preceder o nome do condomínio no cabeçalho do documento — da forma mais
 // específica/confiável pra mais curta/ambígua. A ordem importa: um rótulo curto ("ED", "CON") só é tentado

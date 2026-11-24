@@ -1,15 +1,8 @@
 // pdf-merge.js
-// Junção de PDFs (ex.: síndico pede boleto + comprovante no mesmo arquivo).
-// Marca-se 2+ documentos via checkbox; a fila abaixo da tabela mostra a ordem em que as páginas vão
-// entrar no PDF final (ordem de marcação, ajustável com ▲▼). Junção real de páginas via pdf-lib — mantém o
-// PDF vetorial original (não rasteriza), diferente de qualquer solução que passasse pelas imagens do canvas.
-// Tudo roda no navegador, como o resto do app: nenhum arquivo sai da máquina.
-//
-// Import circular com ui.js: esse módulo precisa ler/mutar a lista de documentos (`items`) e o conjunto de
-// nomes reservados (`usedNames`) que ui.js possui, e chamar de volta renderRow/reorderTable/updateCount/
-// escapeHtml de lá; ui.js, por sua vez, importa `mergeQueueIds`/`toggleMergeSelection` daqui pra desenhar o
-// checkbox de cada linha. Seguro pelo mesmo motivo dos outros ciclos deste projeto — ver config.js.
-import { items, usedNames, uniqueName, renderRow, reorderTable, updateCount, escapeHtml } from './ui.js';
+// Junção de PDFs (ex.: síndico pede boleto + comprovante no mesmo arquivo) via pdf-lib,
+// preservando o PDF vetorial original. Usa state.js + callbacks de initPdfMerge() — sem import circular com ui.js.
+import { items, mergeQueueIds, reserveUniqueName, releaseName } from './state.js';
+import { escapeHtml, stripPdfExt } from './pdf-utils.js';
 
 const mergePanel = document.getElementById('mergePanel');
 const mergeQueueList = document.getElementById('mergeQueueList');
@@ -17,14 +10,29 @@ const mergeNameInput = document.getElementById('mergeNameInput');
 const mergeCancelBtn = document.getElementById('mergeCancelBtn');
 const mergeConfirmBtn = document.getElementById('mergeConfirmBtn');
 
-export let mergeQueueIds = []; // ids selecionados pra juntar num só PDF, na ordem em que serão empilhados (checkbox)
+let callbacks = { onMerged: null };
+
+export function initPdfMerge(cbs = {}){
+  callbacks = { ...callbacks, ...cbs };
+}
 
 export function toggleMergeSelection(id, checked){
   if (checked){
     if (!mergeQueueIds.includes(id)) mergeQueueIds.push(id);
   } else {
-    mergeQueueIds = mergeQueueIds.filter(i => i !== id);
+    const idx = mergeQueueIds.indexOf(id);
+    if (idx >= 0) mergeQueueIds.splice(idx, 1);
   }
+  renderMergePanel();
+}
+
+export function clearMergeQueue(){
+  for (const id of mergeQueueIds){
+    const cb = document.querySelector(`.mergeCheckbox[data-id="${id}"]`);
+    if (cb) cb.checked = false;
+  }
+  mergeQueueIds.length = 0;
+  if (mergeNameInput) delete mergeNameInput.dataset.userEdited;
   renderMergePanel();
 }
 
@@ -37,21 +45,20 @@ function moveInQueue(id, delta){
 }
 
 function removeFromQueue(id){
-  mergeQueueIds = mergeQueueIds.filter(i => i !== id);
+  const idx = mergeQueueIds.indexOf(id);
+  if (idx >= 0) mergeQueueIds.splice(idx, 1);
   renderMergePanel();
-  // Desmarca o checkbox correspondente na tabela, se ainda estiver na tela.
   const cb = document.querySelector(`.mergeCheckbox[data-id="${id}"]`);
   if (cb) cb.checked = false;
 }
 
-// Sugere um nome pro PDF final: usa o nome já sugerido do primeiro documento da fila (normalmente o
-// "principal", ex. o boleto) — o usuário pode sempre editar antes de confirmar.
 function sugerirNomeJuncao(){
   const primeiro = items.find(i => i.id === mergeQueueIds[0]);
-  return primeiro ? primeiro.suggestedName.replace(/\.pdf$/i, '') : '';
+  return primeiro ? stripPdfExt(primeiro.suggestedName || primeiro.originalName) : '';
 }
 
-function renderMergePanel(){
+export function renderMergePanel(){
+  if (!mergePanel) return;
   if (mergeQueueIds.length < 2){
     mergePanel.style.display = 'none';
     return;
@@ -79,25 +86,18 @@ function renderMergePanel(){
   mergeQueueList.querySelectorAll('.mergeRemoveBtn').forEach(b => b.addEventListener('click', () => removeFromQueue(b.dataset.id)));
 }
 
-mergeNameInput.addEventListener('input', () => { mergeNameInput.dataset.userEdited = '1'; });
+if (mergeNameInput){
+  mergeNameInput.addEventListener('input', () => { mergeNameInput.dataset.userEdited = '1'; });
+}
 
-mergeCancelBtn.addEventListener('click', () => {
-  for (const id of mergeQueueIds){
-    const cb = document.querySelector(`.mergeCheckbox[data-id="${id}"]`);
-    if (cb) cb.checked = false;
-  }
-  mergeQueueIds = [];
-  delete mergeNameInput.dataset.userEdited;
-  renderMergePanel();
-});
+if (mergeCancelBtn){
+  mergeCancelBtn.addEventListener('click', clearMergeQueue);
+}
 
-// Junta as páginas dos PDFs selecionados (na ordem da fila) num arquivo único via pdf-lib. Preserva o
-// conteúdo vetorial original — não passa pelo canvas/OCR, então não perde qualidade nem depende de imagem.
 async function mergeSelectedPdfs(){
   if (mergeQueueIds.length < 2) return;
-  let nomeFinal = mergeNameInput.value.trim();
-  if (!nomeFinal){ alert('Digite um nome pro PDF final.'); return; }
-  if (!nomeFinal.toLowerCase().endsWith('.pdf')) nomeFinal += '.pdf';
+  const nomeDigitado = stripPdfExt(mergeNameInput.value);
+  if (!nomeDigitado){ alert('Digite um nome pro PDF final.'); return; }
 
   mergeConfirmBtn.disabled = true;
   mergeConfirmBtn.textContent = 'JUNTANDO...';
@@ -113,39 +113,40 @@ async function mergeSelectedPdfs(){
       paginas.forEach(p => merged.addPage(p));
     }
     const mergedBytes = await merged.save();
-    const mergedFile = new File([mergedBytes], nomeFinal, { type: 'application/pdf' });
 
-    // Remove as linhas originais (libera nomes reservados e tira da tela) e entra com uma linha única no lugar.
     const nomesOrigem = rows.map(r => r.suggestedName || r.originalName);
+    const idsParaRemover = new Set(rows.map(r => r.id));
     for (const row of rows){
-      if (row.suggestedName) usedNames.delete(row.suggestedName.toUpperCase());
+      releaseName(row.suggestedName);
       const tr = document.getElementById('row-' + row.id);
       if (tr) tr.remove();
     }
-    // `items` é importado de ui.js: não pode ser reatribuído daqui (binding de import é somente leitura),
-    // então a remoção é feita mutando o array in-place em vez de `items = items.filter(...)`.
-    items.splice(0, items.length, ...items.filter(i => !mergeQueueIds.includes(i.id)));
+    items.splice(0, items.length, ...items.filter(i => !idsParaRemover.has(i.id)));
+
+    const suggestedName = reserveUniqueName(nomeDigitado);
+    const mergedFile = new File([mergedBytes], suggestedName, { type: 'application/pdf' });
 
     const novaLinha = {
       id: 'f' + Math.random().toString(36).slice(2),
       originalFile: mergedFile,
       originalName: nomesOrigem.join(' + '),
-      suggestedName: uniqueName(nomeFinal.replace(/\.pdf$/i, '')) + '.pdf',
+      suggestedName,
       confidence: 1,
       fields: {},
       status: 'ok',
       manualEdit: true,
       merged: true,
-      mergedFrom: nomesOrigem
+      mergedFrom: nomesOrigem,
     };
     items.push(novaLinha);
-    renderRow(novaLinha);
-    reorderTable();
 
-    mergeQueueIds = [];
+    mergeQueueIds.length = 0;
     delete mergeNameInput.dataset.userEdited;
     renderMergePanel();
-    updateCount();
+
+    if (typeof callbacks.onMerged === 'function'){
+      callbacks.onMerged(novaLinha);
+    }
   } catch (err){
     console.error(err);
     alert('Não foi possível juntar esses PDFs: ' + (err.message || err) + '\n\nVerifique se nenhum deles está protegido por senha.');
@@ -155,4 +156,6 @@ async function mergeSelectedPdfs(){
   }
 }
 
-mergeConfirmBtn.addEventListener('click', mergeSelectedPdfs);
+if (mergeConfirmBtn){
+  mergeConfirmBtn.addEventListener('click', mergeSelectedPdfs);
+}

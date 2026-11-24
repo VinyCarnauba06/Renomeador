@@ -5,17 +5,38 @@
 // de uso pessoal, mas evita que qualquer um que ache a URL queime seu crédito de API.
 
 // CommonJS de propósito — evita depender de "type": "module" no package.json (Vercel detecta sozinho).
+const crypto = require('crypto');
+
 module.exports = handler;
 module.exports.config = { runtime: 'nodejs' };
 
 const ALLOWED_ORIGINS = new Set([
+  'https://renomeador.carnauba.dev.br', // domínio customizado (CNAME)
   'https://vinycarnauba06.github.io',
   'http://localhost:3000', // dev local (ex.: `npx serve`)
   'http://127.0.0.1:3000',
+  'http://localhost:5500', // Live Server
+  'http://127.0.0.1:5500',
+  'http://localhost:5173',
 ]);
+for (const extra of String(process.env.EXTRA_ALLOWED_ORIGINS || '').split(',')){
+  const trimmed = extra.trim();
+  if (trimmed) ALLOWED_ORIGINS.add(trimmed);
+}
 
+const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MODEL = 'claude-haiku-4-5-20251001';
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // limite de segurança (base64 já é ~33% maior que o binário)
+const MAX_HINT_LENGTH = 240;
+const UPSTREAM_TIMEOUT_MS = 25_000;
+
+function secretsMatch(provided, expected){
+  if (typeof provided !== 'string' || typeof expected !== 'string' || !expected) return false;
+  const a = Buffer.from(provided, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
 
 // Convenções de nome de arquivo aprendidas no projeto (ver CONTEXTO_PROJETO.md) — mantidas aqui pra o
 // modelo seguir o mesmo padrão que o motor de regras local já usa, mesmo em documentos/condomínios novos.
@@ -69,28 +90,43 @@ async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'method_not_allowed' });
 
   const secretHeader = req.headers['x-renomeador-secret'];
-  if (!process.env.RENOMEADOR_SHARED_SECRET || secretHeader !== process.env.RENOMEADOR_SHARED_SECRET) {
+  if (!secretsMatch(secretHeader, process.env.RENOMEADOR_SHARED_SECRET)) {
     return res.status(401).json({ error: 'unauthorized' });
   }
   if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(500).json({ error: 'server_misconfigured', detail: 'ANTHROPIC_API_KEY ausente' });
   }
 
-  const { image, mimeType, hint } = req.body || {};
+  const { image, mimeType, hint, loteCondominio } = req.body || {};
   if (!image || typeof image !== 'string') {
     return res.status(400).json({ error: 'missing_image' });
   }
   if (image.length > MAX_IMAGE_BYTES * 1.4) {
     return res.status(413).json({ error: 'image_too_large' });
   }
+  const safeMimeType = ALLOWED_MIME_TYPES.has(mimeType) ? mimeType : 'image/jpeg';
+  const safeHint = typeof hint === 'string'
+    ? hint.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, MAX_HINT_LENGTH)
+    : '';
+  const safeLoteCondo = typeof loteCondominio === 'string'
+    ? loteCondominio.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 80)
+    : '';
 
-  const userText = hint
-    ? `Extraia os dados deste documento e responda SOMENTE com o JSON pedido. Dica: este documento já falhou numa tentativa anterior (${hint}) — preste atenção redobrada em rotação, condomínio e data antes de responder.`
+  const extraNotes = [];
+  if (safeHint) {
+    extraNotes.push(`Dica de revisão: este documento falhou numa tentativa anterior (${safeHint}) — preste atenção redobrada em rotação, condomínio e data.`);
+  }
+  if (safeLoteCondo) {
+    extraNotes.push(`Contexto do lote: o usuário informou que este lote provavelmente pertence ao condomínio "${safeLoteCondo}" — use-o apenas se o documento não indicar claramente outro condomínio.`);
+  }
+  const userText = extraNotes.length
+    ? `Extraia os dados deste documento e responda SOMENTE com o JSON pedido.\n${extraNotes.join('\n')}`
     : 'Extraia os dados deste documento e responda SOMENTE com o JSON pedido.';
 
   try {
     const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       headers: {
         'content-type': 'application/json',
         'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -104,7 +140,7 @@ async function handler(req, res) {
           {
             role: 'user',
             content: [
-              { type: 'image', source: { type: 'base64', media_type: mimeType || 'image/jpeg', data: image } },
+              { type: 'image', source: { type: 'base64', media_type: safeMimeType, data: image } },
               { type: 'text', text: userText },
             ],
           },
@@ -124,8 +160,19 @@ async function handler(req, res) {
       return res.status(502).json({ error: 'ai_bad_output', raw });
     }
 
+    if (typeof parsed.nome_sugerido === 'string') {
+      parsed.nome_sugerido = parsed.nome_sugerido
+        .replace(/[\/\\]+/g, '.')
+        .replace(/[:*?"<>|]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
     return res.status(200).json(parsed);
   } catch (err) {
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      return res.status(504).json({ error: 'ai_timeout' });
+    }
     return res.status(500).json({ error: 'server_error', detail: String(err && err.message || err) });
   }
 }

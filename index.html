@@ -2,6 +2,7 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Renomeador de Documentos</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
@@ -12,18 +13,45 @@
 <body>
 <div class="wrap">
   <h1>RENOMEADOR DE DOCUMENTOS</h1>
-  <div class="sub">Arraste PDFs digitalizados — leitura, identificação e renomeação automática, tudo no seu navegador.</div>
+  <div class="sub">Arraste PDFs digitalizados — leitura local por regras e OCR aprimorado, com extração via IA opcional.</div>
 
-  <div class="loteHint">
-    <label for="loteCondominioSelect">Este lote é de um condomínio só? (opcional — usado quando o OCR não conseguir identificar pelo conteúdo)</label>
-    <select id="loteCondominioSelect">
-      <option value="">— detectar automaticamente —</option>
-    </select>
+  <div class="topControls">
+    <div class="loteHint">
+      <label for="loteCondominioSelect">Condomínio único do lote (opcional):</label>
+      <select id="loteCondominioSelect">
+        <option value="">— detectar automaticamente —</option>
+      </select>
+    </div>
+    <button id="aiConfigBtn" type="button" class="secondary aiStatusBtn">⚙ IA: configurar</button>
+  </div>
+
+  <div id="aiConfigPanel" class="aiConfigPanel" style="display:none">
+    <div class="aiConfigRow">
+      <label class="aiToggleLabel">
+        <input type="checkbox" id="aiEnabledToggle">
+        <span>Usar IA (Claude Vision) quando as regras locais não resolverem</span>
+      </label>
+    </div>
+    <div class="aiConfigGrid">
+      <div>
+        <label for="aiSecretInput" class="aiFieldLabel">Chave de acesso do backend (RENOMEADOR_SHARED_SECRET)</label>
+        <input type="password" id="aiSecretInput" class="aiInput" placeholder="Cole a chave compartilhada do seu backend">
+      </div>
+      <div>
+        <label for="aiEndpointInput" class="aiFieldLabel">URL do backend (endpoint /api/extract)</label>
+        <input type="url" id="aiEndpointInput" class="aiInput" placeholder="https://seu-projeto.vercel.app/api/extract">
+      </div>
+    </div>
+    <div class="aiConfigActions">
+      <button id="aiClearBtn" type="button" class="secondary">LIMPAR CHAVE</button>
+      <button id="aiCloseBtn" type="button" class="secondary">FECHAR</button>
+      <button id="aiSaveBtn" type="button">SALVAR CONFIGURAÇÃO</button>
+    </div>
   </div>
 
   <div id="drop">
     <div class="big">Arraste os PDFs para esta área</div>
-    <div class="small">ou clique para selecionar arquivos — leitura do PDF é local; documentos não reconhecidos pelas regras são enviados (só a imagem da página) pra um backend de IA</div>
+    <div class="small">ou clique para selecionar arquivos — leitura por regras e OCR local no navegador; IA só é acionada se estiver configurada e ativa</div>
     <input type="file" id="fileInput" accept="application/pdf" multiple>
   </div>
 
@@ -34,22 +62,28 @@
 
   <div id="empty">Nenhum documento processado ainda.</div>
 
+  <div id="filterBar" class="filterBar" style="display:none">
+    <div class="filterTabs">
+      <button type="button" class="secondary filterBtn active" data-filter="all">Todos (<span id="countAll">0</span>)</button>
+      <button type="button" class="secondary filterBtn" data-filter="pending">Pendentes (<span id="countPending">0</span>)</button>
+      <button type="button" class="secondary filterBtn" data-filter="ok">Prontos (<span id="countOk">0</span>)</button>
+    </div>
+    <input type="search" id="searchInput" class="searchInput" placeholder="Filtrar por nome ou condomínio...">
+  </div>
+
   <table id="resultsTable" style="display:none">
     <thead>
       <tr>
         <th style="width:4%"></th>
         <th style="width:20%">Arquivo original</th>
-        <th style="width:36%">Nome identificado</th>
-        <th style="width:12%">Confiança</th>
-        <th style="width:28%">Campos encontrados</th>
+        <th style="width:38%">Nome identificado</th>
+        <th style="width:13%">Confiança</th>
+        <th style="width:25%">Campos encontrados</th>
       </tr>
     </thead>
     <tbody id="resultsBody"></tbody>
   </table>
 
-  <!-- Fila de junção: aparece quando 2+ documentos são marcados na coluna de checkbox. Pensado pro caso do
-       síndico pedir digitalizações num único PDF (ex.: boleto + comprovante) — o usuário marca os arquivos
-       envolvidos, ajusta a ordem das páginas no PDF final e confirma. -->
   <div class="actions mergePanel" id="mergePanel" style="display:none">
     <div class="mergePanelInner">
       <div class="mergePanelTitle">🔗 Juntar em 1 PDF — ordem das páginas no arquivo final:</div>
@@ -67,7 +101,7 @@
 
   <div class="actions" id="actionsBar" style="display:none">
     <div id="count"></div>
-    <div style="display:flex;gap:10px;">
+    <div class="actionsGroup">
       <button id="clearBtn" class="secondary">LIMPAR LISTA / NOVO LOTE</button>
       <button id="reviewBtn" class="secondary" style="display:none">REVISAR BAIXA CONFIANÇA</button>
       <button id="downloadBtn">BAIXAR TODOS (.ZIP)</button>
@@ -76,14 +110,28 @@
 
   <div class="actions" id="learnBar">
     <div id="learnCount"></div>
-    <div style="display:flex;gap:10px;">
+    <div class="actionsGroup">
       <button id="exportLearnBtn" class="secondary">EXPORTAR APRENDIZADO</button>
       <button id="importLearnBtn" class="secondary">IMPORTAR APRENDIZADO</button>
       <input type="file" id="importLearnInput" accept="application/json" style="display:none">
     </div>
   </div>
 
-  <div class="rulehint">As regras de nomenclatura ficam em <code>DOCUMENT_TYPES</code> e <code>CONDOMINIOS</code>, no início do script — edite/adicione ali conforme surgirem novos tipos de documento ou condomínios. O que essas regras não reconhecerem cai automaticamente pra extração via IA.</div>
+  <div class="rulehint">As regras de nomenclatura ficam em <code>DOCUMENT_TYPES</code> e <code>CONDOMINIOS</code> em <code>config.js</code>. Documentos não resolvidos localmente usam IA (se ativa) ou OCR local com pré-processamento adaptativo.</div>
+</div>
+
+<!-- Modal de visualização rápida do PDF original (evita abrir dezenas de abas) -->
+<div id="previewModal" class="previewModal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="previewTitle">
+  <div class="previewCard">
+    <div class="previewHeader">
+      <div id="previewTitle" class="previewTitle"></div>
+      <div class="previewHeaderActions">
+        <button id="previewNewTabBtn" type="button" class="secondary">Abrir em nova aba</button>
+        <button id="previewCloseBtn" type="button" class="secondary">✕ Fechar</button>
+      </div>
+    </div>
+    <iframe id="previewFrame" class="previewFrame" title="Visualização do PDF"></iframe>
+  </div>
 </div>
 
 <script type="module" src="main.js"></script>

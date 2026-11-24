@@ -8,20 +8,17 @@ App client-side (PDF.js + Tesseract.js + JSZip + pdf-lib) que lê PDFs digitaliz
 **Mudança de arquitetura (25/ago):** a restrição "sem backend" foi abandonada de propósito. Motor de regras (`DOCUMENT_TYPES`/`CONDOMINIOS`) era fechado — só reconhecia o que já tinha sido ensinado manualmente (whitelist de condomínios Prolar, tipos de documento pré-cadastrados). Qualquer coisa fora disso, mesmo com OCR perfeito, caía em "não identificado". Em vez de continuar ampliando regex pra sempre, foi adicionado um backend serverless (Vercel, `api/extract.js`) que faz proxy autenticado pra Claude API (visão): documentos que o motor de regras local não resolver são mandados como imagem pro backend e voltam já com tipo/condomínio/data/nome sugerido extraídos por IA, sem precisar de regra pré-cadastrada.
 
 ## Arquitetura
-- `index.html` — carrega libs via CDN (cdnjs) + `script.js`.
-- `style.css`
-- `script.js` — tudo do front:
-  - `CONDOMINIOS`: whitelist de ~30 condomínios (nome + aliases) — atalho de alta confiança pro caminho local, não é mais o único jeito de reconhecer condomínio (a IA reconhece qualquer um pelo conteúdo).
-  - `DOCUMENT_TYPES`: array ordenado de detectores `{id, test, extract, format, confidence}` — primeiro que casar decide o nome. Continua sendo o caminho RÁPIDO/GRÁTIS/OFFLINE pros casos já ensinados.
-  - `identifyDocument()`: motor de regras local original — roda os detectores, aplica penalidade por confiança de OCR, corte duro (`RULES_SEM_CONDOMINIO`) sem condomínio resolvido. Inalterado.
-  - `identifyDocumentSmart(file)` (NOVO): orquestrador principal, chamado no lugar de `extractPdfText`+`identifyDocument` direto. Ordem: (1) texto nativo do PDF + `identifyDocument()` local — se confiança >= `CONFIDENCE_THRESHOLD`, retorna na hora, sem rede; (2) senão, renderiza pág. 1 em canvas e chama `extractWithAI()` — o backend devolve JSON já formatado (`nome_sugerido`, `condominio`, `confidence`, etc.); (3) se a IA falhar (sem chave, sem rede, backend fora do ar), cai pro pipeline antigo de OCR local (Tesseract) + `identifyDocument()`, como último recurso pra nunca deixar o app 100% sem funcionar.
-  - `extractWithAI(canvas, {hint})` / `getAiSecret()` / `canvasToBase64Jpeg()`: cliente HTTP pro backend. A "chave" pedida ao usuário (`localStorage`, prompt na primeira vez) é só o segredo compartilhado do backend (`RENOMEADOR_SHARED_SECRET`), NUNCA a chave da Anthropic.
-  - Pipeline de OCR local (Tesseract) continua existindo intacto — vira fallback de rede indisponível, não é mais o caminho principal pra PDF só-imagem.
-  - Botão "revisar baixa confiança" (`reviewDocument`): agora tenta IA em resolução maior (3.5) com uma dica de contexto primeiro; só cai pro `ocrDeepReview` (3 PSM × 4 rotações local) se a IA falhar.
-  - Feature de junção de PDFs: checkbox por linha → fila reordenável → `mergeSelectedPdfs()` via pdf-lib. Inalterado.
-  - Marcador `UI / ORQUESTRAÇÃO` no arquivo separa lógica pura (testável em Node) do DOM. Inalterado.
-- `api/extract.js` (NOVO) — função serverless Vercel. Recebe `{ image (base64), mimeType, hint? }`, valida `X-Renomeador-Secret` contra `RENOMEADOR_SHARED_SECRET`, chama `POST https://api.anthropic.com/v1/messages` (modelo `claude-haiku-4-5-20251001`, vision) com a chave `ANTHROPIC_API_KEY` (env var, nunca exposta), parseia o JSON da resposta e devolve pro front. CORS restrito a `ALLOWED_ORIGINS` (github.io do Viny + localhost pra dev).
-- `package.json` / `.env.example` / `.gitignore` (NOVOS) — infra mínima pro deploy Vercel.
+- `index.html` / `style.css` — carrega libs via CDN (PDF.js, Tesseract.js, JSZip, pdf-lib) + `main.js` (ES modules). Inclui painel de configuração da IA (sem `window.prompt()`), barra de filtros/busca e modal de preview embutido do PDF.
+- `pdf-utils.js` — utilitários puros: sanitização de nome de arquivo (`sanitizeFilename`, evita subpastas/caracteres inválidos no ZIP/Windows), escape HTML, abertura/renderização de PDF com fundo branco e liberação de memória de canvas (`releaseCanvas`).
+- `state.js` — estado compartilhado da sessão (`items`, `usedNames` normalizado sem `.pdf`, `mergeQueueIds` e dica de condomínio do lote). Elimina o import circular entre `ui.js` e `pdf-merge.js`.
+- `config.js` — `CONDOMINIOS` (~30 condomínios), `DOCUMENT_TYPES` (regras ordenadas), `MESES`, `CONFIDENCE_THRESHOLD`, `RULES_SEM_CONDOMINIO` e chaves de configuração da IA.
+- `rules-engine.js` — Tier 1 (motor de regras local): `identifyDocument()`, `findCondominioFallback()`, `findData()`, aprendizado em `localStorage`.
+- `ocr-pipeline.js` — Tier 3 (OCR local puro, sem dependência de IA): pré-processamento por percentil (2%–98%), binarização adaptativa Bradley-Roth (Integral Image) sob demanda quando a leitura em cinza fica fraca e na revisão profunda, Tesseract com `preserve_interword_spaces=1` e `user_defined_dpi=200`, auto-rotação `[0, 90, 270, 180]`, `OCR_KEYWORDS` atualizado e fallback pra página 2 na revisão profunda.
+- `ai-extraction.js` — Tier 2 + orquestração principal (`identifyDocumentSmart` e `reviewDocumentSmart`): abre o PDF uma única vez, reaproveita o canvas no fallback pro OCR, envia `loteCondominio` no contexto pra IA, normaliza condomínio contra a whitelist e sempre fecha o PDF com `pdf.destroy()`.
+- `pdf-merge.js` — junção vetorial de PDFs via pdf-lib usando `state.js` e callback `onMerged`.
+- `ui.js` — orquestração de DOM: concorrência controlada (3x quando IA ativa, 1x no OCR local), edição inline em qualquer linha (inclusive alta confiança), remoção individual, download individual ou `.zip`, filtros/busca e preview embutido.
+- `api/extract.js` — função serverless Vercel (CommonJS): valida `X-Renomeador-Secret` com `crypto.timingSafeEqual`, CORS incluindo `https://renomeador.carnauba.dev.br` (CNAME) + `github.io` + localhost, timeout de 25s na chamada Anthropic e sanitização de `hint`/`nome_sugerido`.
+- `tests/renomeador.test.mjs` — suíte automatizada em Node (`npm test` / `node --test`).
 
 ## Deploy do backend (pendente — Viny precisa fazer manualmente)
 1. `npm i -g vercel` (se ainda não tiver) e `vercel login`.

@@ -55,15 +55,25 @@ Não há backend, banco de dados ou API própria. A única comunicação de rede
 ## Estrutura do projeto
 
 ```
-index.html   estrutura da página (sem lógica)
-style.css    estilos
-script.js    toda a lógica: leitura de PDF, OCR, regras de nomenclatura e interface
-README.md    este arquivo
+index.html               estrutura da página (filtros, painel de IA, modal de preview)
+style.css                estilos
+main.js                  entrypoint (ES modules)
+config.js                regras de negócio (CONDOMINIOS, DOCUMENT_TYPES, MESES)
+rules-engine.js          motor de regras local (Tier 1) + aprendizado em localStorage
+ai-extraction.js         orquestrador Tier 1 -> Tier 2 (IA) -> Tier 3 (OCR)
+ocr-pipeline.js          OCR local com pré-processamento por percentil + binarização adaptativa
+pdf-utils.js             utilitários de PDF.js, sanitização de nomes e escape HTML
+state.js                 estado compartilhado da sessão e reserva de nomes únicos
+pdf-merge.js             junção vetorial de PDFs via pdf-lib
+ui.js                    interface, edição inline, preview embutido, filtros e exportação
+api/extract.js           proxy serverless (Vercel) para extração opcional via Claude Vision
+tests/renomeador.test.mjs suíte de testes automatizados (node --test)
+README.md                este arquivo
 ```
 
 ## Adicionando novos tipos de documento ou condomínios
 
-As regras de nomenclatura ficam concentradas no início do arquivo `script.js`, nas constantes:
+As regras de nomenclatura ficam concentradas em `config.js`, nas constantes:
 
 - `CONDOMINIOS` — lista de condomínios conhecidos e seus apelidos/variações de OCR.
 - `DOCUMENT_TYPES` — lista ordenada de detectores (tipo de documento, teste de reconhecimento, extração de campos e formato do nome final).
