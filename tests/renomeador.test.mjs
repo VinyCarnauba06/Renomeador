@@ -98,6 +98,18 @@ test('rules-engine: detectores principais de DOCUMENT_TYPES', () => {
   assert.equal(prot.nome, 'PROTOCOLO 08.08');
   assert.ok(prot.confidence >= CONFIDENCE_THRESHOLD);
 
+  // Continuação de protocolo de entrega sem cabeçalho (padrão real do lote de 420 PDFs)
+  const protCont = identifyDocument('BOSSA NOVA BOLETO TAXA DE CONSUMO NOVEMBRO/2026 48 12/11/2026\nINNOVARE COMUNICADO SALÃO 12/11/2026', null);
+  assert.equal(protCont.ruleId, 'protocolo_entrega_boletos');
+  assert.equal(protCont.nome, 'PROTOCOLO 12.11');
+  assert.equal(protCont.fields.ano, '2026');
+
+  // Lista Proprietário/Locatário (Condomínio21 / PRO-LAR)
+  const propLoc = identifyDocument('PRO-LAR ADMINISTRADORA\nPROTOCOLO\nCondomínio do Edifício Breezes\nReferência: TAXA DE CONDOMÍNIO - SETEMBRO/2026\nUnidade | Proprietário/Locatário | Correio', null);
+  assert.equal(propLoc.ruleId, 'lista_proprietarios_taxa');
+  assert.equal(propLoc.nome, 'PROTOCOLO BREEZES SETEMBRO');
+  assert.ok(propLoc.confidence >= CONFIDENCE_THRESHOLD);
+
   // Equatorial fatura real vs demonstrativo que só cita Equatorial
   const eq = identifyDocument('EQUATORIAL ENERGIA\nCONDOMINIO VIVANT\nCONTA MÊS: 07/2026\nNÚMERO DA UC: 1020304567', null);
   assert.equal(eq.ruleId, 'fatura_energia_equatorial');

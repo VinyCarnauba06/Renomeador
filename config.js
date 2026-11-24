@@ -110,16 +110,25 @@ export const DOCUMENT_TYPES = [
       if (/PROTOCOLO\s+DE\s+ENTREGA/.test(norm) || semEspacosNorm.includes('PROTOCOLODEENTREGA')) return true;
       // A linha de título nem sempre sobrevive ao OCR (fonte pequena/rotacionada). O conjunto de
       // cabeçalhos de coluna sozinho já é uma "impressão digital" confiável desta tabela específica.
-      return /CONDOMINIO/.test(norm) && /DESCRI[CÇ][AÃ]O/.test(norm) && (/ENVIADO/.test(norm) || /RECEBIDO/.test(norm));
+      if (/CONDOMINIO/.test(norm) && /DESCRI[CÇ][AÃ]O/.test(norm) && (/ENVIADO/.test(norm) || /RECEBIDO/.test(norm))) return true;
+      // Páginas de continuação/verso da planilha do setor de boletos não repetem o cabeçalho — só trazem
+      // linhas de "COMUNICADO SALÃO" e/ou múltiplas linhas "BOLETO TAXA DE CONDOMÍNIO/CONSUMO/EXTRA" + datas.
+      if (norm.includes('COMUNICADO SALAO')) return true;
+      const linhasBoleto = norm.match(/BOLETO\s+TAXA\s+(?:DE\s+(?:CONDOMINIO|CONSUMO)|EXTRA)|BOLETO\s+MULTA/g) || [];
+      return linhasBoleto.length >= 2;
     },
-    extract: (norm, raw) => ({ dataDDMM: findData(raw).dataDDMM }),
+    extract: (norm, raw) => {
+      const d = findData(raw);
+      return { dataDDMM: d.dataDDMM, mes: d.mes, ano: d.ano };
+    },
     format: f => f.dataDDMM ? `PROTOCOLO ${f.dataDDMM}` : null,
     confidence: f => f.dataDDMM ? 0.9 : 0.35
   },
   {
-    // Lista de proprietários/inquilinos usada como comprovante de entrega da taxa de condomínio
+    // Lista de proprietários/inquilinos/locatários usada como comprovante de entrega da taxa de condomínio
+    // (cobre também o layout Condomínio21 / PRO-LAR: "PROTOCOLO ... Referência: TAXA DE CONDOMÍNIO - MÊS/AAAA ... Proprietário/Locatário").
     id: "lista_proprietarios_taxa",
-    test: (norm) => /(LISTA\s+DE\s+PROPRIETARIOS|PROPRIETARIOS\s*\/\s*INQUILINOS)/.test(norm) && /TAXA\s+DE\s+CONDOMINIO/.test(norm),
+    test: (norm) => /(LISTA\s+DE\s+PROPRIETARIOS|PROPRIETARIOS?\s*\/\s*(INQUILINOS?|LOCATARIOS?))/.test(norm) && /TAXA\s+DE\s+CONDOMINIO/.test(norm),
     extract: (norm, raw) => {
       const condominio = resolverCondominio(norm, raw);
       // Nesta regra o nome final leva o mês por extenso (ex.: "JULHO"), não abreviado — é assim que aparece nos exemplos reais.
@@ -156,7 +165,7 @@ export const DOCUMENT_TYPES = [
   {
     // Lista de proprietários usada como comprovante genérico (sem "taxa de condomínio" explícita) — protocolo + condomínio
     id: "lista_proprietarios_generico",
-    test: (norm) => /(LISTA\s+DE\s+PROPRIETARIOS|PROPRIETARIOS\s*\/\s*INQUILINOS)/.test(norm),
+    test: (norm) => /(LISTA\s+DE\s+PROPRIETARIOS|PROPRIETARIOS?\s*\/\s*(INQUILINOS?|LOCATARIOS?))/.test(norm),
     extract: (norm, raw) => ({ condominio: resolverCondominio(norm, raw) }),
     format: f => f.condominio ? `PROTOCOLO ${f.condominio}` : null,
     confidence: f => f.condominio ? 0.6 : 0.2
