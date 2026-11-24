@@ -189,7 +189,9 @@ export async function identifyDocumentSmart(file){
     }
 
     const page1 = await pdf.getPage(1);
-    const canvas = await renderPageToCanvas(page1, 2.5);
+    // Escala 2.0 (~144 DPI): ~36% menos pixels que 2.5 — acelera bem o OCR local e também encaixa no
+    // tamanho ideal da Anthropic Vision (que redimensiona >1568px). Revisão profunda continua em 3.5.
+    const canvas = await renderPageToCanvas(page1, 2.0);
     try {
       if (isAiReady()){
         try {

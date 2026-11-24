@@ -87,6 +87,45 @@ let activeFilter = 'all';
 let currentPreviewUrl = null;
 let isBatchRunning = false;
 let cancelRequested = false;
+let batchStartTime = 0;
+let wakeLockSentinel = null;
+
+async function acquireWakeLock(){
+  try {
+    if (navigator.wakeLock && typeof navigator.wakeLock.request === 'function'){
+      wakeLockSentinel = await navigator.wakeLock.request('screen');
+    }
+  } catch { /* navegador não suporta ou aba não está ativa */ }
+}
+
+async function releaseWakeLock(){
+  try {
+    if (wakeLockSentinel){
+      await wakeLockSentinel.release();
+      wakeLockSentinel = null;
+    }
+  } catch { wakeLockSentinel = null; }
+}
+
+// Yield sem setTimeout: em abas em 2º plano, Chrome/Edge estrangulam setTimeout pra 1s–60s;
+// MessageChannel devolve o controle pro event loop sem cair nesse throttle.
+function yieldToBrowser(){
+  return new Promise(resolve => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => resolve();
+    ch.port2.postMessage(null);
+  });
+}
+
+function formatEta(done, total){
+  if (!batchStartTime || done < 3 || done >= total) return '';
+  const elapsedMs = Date.now() - batchStartTime;
+  const remainingSec = Math.round((elapsedMs / done) * (total - done) / 1000);
+  if (remainingSec < 60) return ` · ~${remainingSec}s restantes`;
+  const min = Math.floor(remainingSec / 60);
+  const sec = remainingSec % 60;
+  return ` · ~${min}m${sec > 0 ? String(sec).padStart(2, '0') + 's' : ''} restantes`;
+}
 
 window.addEventListener('beforeunload', e => {
   if (isBatchRunning || items.length > 0){
@@ -253,6 +292,8 @@ async function handleFiles(files){
 
   isBatchRunning = true;
   cancelRequested = false;
+  batchStartTime = Date.now();
+  acquireWakeLock();
   cancelBatchBtn.style.display = 'inline-block';
   cancelBatchBtn.disabled = false;
   cancelBatchBtn.textContent = 'PARAR LOTE';
@@ -314,11 +355,13 @@ async function handleFiles(files){
       reorderTable();
       applyFilters();
       if (bloco < totalBlocos - 1){
-        await new Promise(resolve => setTimeout(resolve, 0));
+        await yieldToBrowser();
       }
     }
   } finally {
     isBatchRunning = false;
+    batchStartTime = 0;
+    releaseWakeLock();
     cancelBatchBtn.style.display = 'none';
   }
 
@@ -334,9 +377,10 @@ async function handleFiles(files){
 
 function updateProgress(done, total, bloco, totalBlocos){
   const pct = total ? Math.round((done / total) * 100) : 0;
+  const eta = formatEta(done, total);
   progressLabel.textContent = (totalBlocos && totalBlocos > 1)
-    ? `Lote ${bloco} de ${totalBlocos} (30 por vez) — ${done} de ${total} documentos no total...`
-    : `Processando ${done} de ${total} documentos...`;
+    ? `Lote ${bloco} de ${totalBlocos} (30 por vez) — ${done} de ${total} (${pct}%)${eta}`
+    : `Processando ${done} de ${total} (${pct}%)${eta}`;
   progressFill.style.width = pct + '%';
 }
 

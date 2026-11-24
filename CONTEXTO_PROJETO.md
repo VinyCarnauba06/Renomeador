@@ -1,3 +1,4 @@
+Lote 1 de 14 (30 por vez) — 12 de 420 documentos no total...
 # Contexto — Renomeador de Documentos
 
 > Cole este arquivo (ou peça pra Claude ler `C:\Dev\Renomeador\CONTEXTO_PROJETO.md`) no início do próximo chat pra retomar de onde parou.

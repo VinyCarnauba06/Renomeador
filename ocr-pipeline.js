@@ -200,9 +200,15 @@ const OCR_KEYWORDS = [
 
 function ocrLooksGood(text, confidence){
   if (!text || text.trim().length < 15) return false;
-  if (confidence < 40) return false;
   const norm = normalize(text);
-  return OCR_KEYWORDS.some(k => norm.includes(k));
+  let hits = 0;
+  for (const k of OCR_KEYWORDS){
+    if (norm.includes(k)){
+      hits++;
+      if (hits >= 2 && confidence >= 32) return true; // 2+ palavras de negócio já provam que a rotação está certa
+    }
+  }
+  return hits >= 1 && confidence >= 40;
 }
 
 function ocrQualityScore(text, confidence){
@@ -230,9 +236,9 @@ async function ocrWithAutoRotate(canvas0){
     if (ocrLooksGood(text, confidence)) break;
   }
 
-  // Se o melhor resultado ainda ficou fraco (ex.: foto com sombra forte ou papel escuro),
-  // tenta binarização adaptativa Bradley-Roth no melhor ângulo encontrado — custo baixo (~1 reconhecimento).
-  if (best && (best.confidence < 58 || !ocrLooksGood(best.text, best.confidence))){
+  // Só dispara a passada extra de binarização adaptativa na 1ª leitura quando a confiança ficar realmente
+  // baixa (< 45) — evita duplicar OCR em scans medianos (a revisão profunda continua testando sempre).
+  if (best && best.confidence < 45){
     const rotatedBest = rotateCanvas(canvas0, best.degrees);
     const binaryCanvas = createAdaptiveBinaryCanvas(rotatedBest);
     if (rotatedBest !== canvas0) releaseCanvas(rotatedBest);
@@ -273,7 +279,7 @@ export async function extractPdfText(file){
     }
 
     const page1 = await pdf.getPage(1);
-    const canvas = await renderPageToCanvas(page1, 2.5);
+    const canvas = await renderPageToCanvas(page1, 2.0);
     try {
       return await ocrFromCanvas(canvas, { alreadyPreprocessed: false });
     } finally {
