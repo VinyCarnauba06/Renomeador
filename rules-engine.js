@@ -192,21 +192,37 @@ export function resolverCondominio(norm, raw){
   return findCondominio(norm) || findCondominioFallback(raw) || condominioDoLote();
 }
 
+// Valida faixa plausível de ano para documentos administrativos correntes (evita lixo de OCR como
+// 3026, 2086, 2036, 2038 ou datas antigas/números aleatórios como 2002/2016 virando pasta no ZIP).
+export function isPlausibleDocumentYear(ano){
+  const y = Number(ano);
+  if (!Number.isInteger(y)) return false;
+  const maxYear = new Date().getFullYear() + 1;
+  return y >= 2020 && y <= maxYear;
+}
+
 // Procura datas em formatos DD/MM/AAAA, DD-MM-AAAA, DD.MM.AAAA, DD/MM, "05 de julho de 2026" etc.
 export function findData(rawText){
-  // dd/mm/aaaa ou dd-mm-aaaa ou dd.mm.aaaa
-  let m = rawText.match(/\b([0-3]?\d)[\/\-\.]([0-1]?\d)[\/\-\.](\d{4}|\d{2})\b/);
-  if (m && Number(m[1]) >= 1 && Number(m[1]) <= 31 && Number(m[2]) >= 1 && Number(m[2]) <= 12){
+  // dd/mm/aaaa ou dd-mm-aaaa ou dd.mm.aaaa — prefere a primeira data com ano plausível
+  let fallbackDate = null;
+  for (const m of rawText.matchAll(/\b([0-3]?\d)[\/\-\.]([0-1]?\d)[\/\-\.](\d{4}|\d{2})\b/g)){
+    if (Number(m[1]) < 1 || Number(m[1]) > 31 || Number(m[2]) < 1 || Number(m[2]) > 12) continue;
     const dd = m[1].padStart(2,'0');
     const mm = m[2].padStart(2,'0');
     let yyyy = m[3];
     if (yyyy.length === 2) yyyy = '20' + yyyy;
-    return { dataDDMM: `${dd}.${mm}`, mes: mesPorNumero(mm), ano: yyyy };
+    if (isPlausibleDocumentYear(yyyy)){
+      return { dataDDMM: `${dd}.${mm}`, mes: mesPorNumero(mm), ano: yyyy };
+    }
+    if (!fallbackDate){
+      // Mantém dia/mês mesmo quando o OCR estragou o ano (ex.: 14/11/3026 -> 14.11, ano null)
+      fallbackDate = { dataDDMM: `${dd}.${mm}`, mes: mesPorNumero(mm), ano: null };
+    }
   }
-  // dd/mm sem ano — dia/mês "00" (achado 13/ago: "0.00" de um valor monetário tipo "R$ 0.00" casando à toa
-  // com esse padrão) é rejeitado aqui e cai pros fallbacks de mês/ano por extenso abaixo, em vez de virar
-  // uma data fantasma "00.00" no nome do arquivo.
-  m = rawText.match(/\b([0-3]?\d)[\/\-\.]([0-1]?\d)\b/);
+  if (fallbackDate) return fallbackDate;
+
+  // dd/mm sem ano — dia/mês "00" (ex.: "R$ 0.00") é rejeitado
+  let m = rawText.match(/\b([0-3]?\d)[\/\-\.]([0-1]?\d)\b/);
   if (m && Number(m[1]) >= 1 && Number(m[1]) <= 31 && Number(m[2]) >= 1 && Number(m[2]) <= 12){
     const dd = m[1].padStart(2,'0');
     const mm = m[2].padStart(2,'0');
@@ -219,7 +235,7 @@ export function findData(rawText){
     const dd = m[1].padStart(2,'0');
     const mesNome = m[2];
     const mes = MESES[mesNome] || null;
-    const ano = m[3];
+    const ano = isPlausibleDocumentYear(m[3]) ? m[3] : null;
     if (mes){
       const mmNum = numeroPorMesAbrev(mes);
       return { dataDDMM: mmNum ? `${dd}.${mmNum}` : null, mes: mes, ano };
@@ -228,7 +244,7 @@ export function findData(rawText){
   // Só mês/ano por extenso: "JULHO DE 2026" / "JULHO/2026"
   m = normText.match(/\b([A-Z]+)\s*(?:DE|\/)\s*(\d{4})\b/);
   if (m && MESES[m[1]]){
-    return { dataDDMM: null, mes: MESES[m[1]], ano: m[2] };
+    return { dataDDMM: null, mes: MESES[m[1]], ano: isPlausibleDocumentYear(m[2]) ? m[2] : null };
   }
   return { dataDDMM: null, mes: null, ano: null };
 }
@@ -256,17 +272,17 @@ function extrairMesAnoDeTexto(str){
   const norm = normalize(String(str).replace(/\.pdf$/i, ''));
 
   // 1) "OUT 2026", "OUT/2026", "OUT.2026", "OUTUBRO 2026", "OUTUBRO/2026"
-  let m = norm.match(/\b([A-Z]{3,10})[\s./-]+(20\d{2})\b/);
+  let m = norm.match(/\b([A-Z]{3,10})[\s./-]+(\d{4})\b/);
   if (m){
     const mes = normalizarMesAbrev(m[1]);
-    if (mes) return { mes, ano: m[2] };
+    if (mes) return { mes, ano: isPlausibleDocumentYear(m[2]) ? m[2] : null };
   }
 
   // 2) "DD.MM.AAAA", "DD/MM/AAAA", "DD-MM-AAAA"
-  m = norm.match(/\b([0-3]?\d)[./-]([0-1]?\d)[./-](20\d{2})\b/);
+  m = norm.match(/\b([0-3]?\d)[./-]([0-1]?\d)[./-](\d{4})\b/);
   if (m && Number(m[1]) >= 1 && Number(m[1]) <= 31){
     const mes = mesPorNumero(m[2].padStart(2, '0'));
-    if (mes) return { mes, ano: m[3] };
+    if (mes) return { mes, ano: isPlausibleDocumentYear(m[3]) ? m[3] : null };
   }
 
   // 3) "DD.MM" ou "DD/MM" sem ano (ex.: "PROTOCOLO 08.10", "DARF VIVANT 20.11")
@@ -290,11 +306,12 @@ function extrairAnoDeNomeOriginal(originalName){
   if (!originalName) return null;
   // Padrão de scanner: doc11122420260925135247.pdf -> 2026
   const m = String(originalName).match(/(20\d{2})(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])/);
-  return m ? m[1] : null;
+  return m && isPlausibleDocumentYear(m[1]) ? m[1] : null;
 }
 
 // Resolve o nome da pasta mensal no ZIP (ex.: "OUT.2026", "NOV.2026" ou "SEM DATA").
-// Prioridade: nome final sugerido/editado -> campos extraídos -> texto OCR -> ano de fallback.
+// Prioridade: nome final sugerido/editado -> campos extraídos -> texto OCR -> ano do scanner / ano atual.
+// Anos absurdos de ruído de OCR (3026, 2086, 2002, 2036, 2016, 2038) são descartados automaticamente.
 export function resolveZipMonthFolder(row, fallbackYear = String(new Date().getFullYear())){
   const f = (row && row.fields) || {};
   const fromName = extrairMesAnoDeTexto(row && row.suggestedName);
@@ -306,16 +323,20 @@ export function resolveZipMonthFolder(row, fallbackYear = String(new Date().getF
     || extrairMesAnoDeTexto(f.data).mes
     || extrairMesAnoDeTexto(f.dataDDMM).mes;
 
-  let ano = fromName.ano
-    || (f.ano && /^20\d{2}$/.test(String(f.ano)) ? String(f.ano) : null)
-    || extrairMesAnoDeTexto(f.mesAno).ano
-    || extrairMesAnoDeTexto(f.data).ano;
+  const pickValidYear = (...candidates) => candidates.find(y => y && isPlausibleDocumentYear(y)) || null;
+
+  let ano = pickValidYear(
+    fromName.ano,
+    f.ano,
+    extrairMesAnoDeTexto(f.mesAno).ano,
+    extrairMesAnoDeTexto(f.data).ano
+  );
 
   // Se ainda faltou mês ou ano, tenta extrair do texto OCR/nativo
   if ((!mes || !ano) && row && row.ocrText && !row.ocrText.startsWith('[PDF')){
     const fromOcr = findData(row.ocrText);
     if (!mes && fromOcr.mes) mes = fromOcr.mes;
-    if (!ano && fromOcr.ano) ano = fromOcr.ano;
+    if (!ano && fromOcr.ano && isPlausibleDocumentYear(fromOcr.ano)) ano = fromOcr.ano;
   }
 
   if (!mes) return 'SEM DATA';

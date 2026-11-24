@@ -176,6 +176,17 @@ test('rules-engine: resolveZipMonthFolder organiza em pastas MES.AAAA ou SEM DAT
   assert.equal(resolveZipMonthFolder({ suggestedName: 'PROTOCOLO VIVANT JULHO.pdf', fields: { ano: '2026' } }), 'JUL.2026');
   // Sem nenhuma data identificável
   assert.equal(resolveZipMonthFolder({ suggestedName: 'PROTOCOLO RESERVA VIVANT.pdf', fields: {} }), 'SEM DATA');
+  // Rejeita anos absurdos de OCR (3026, 2086, 2002, 2036, 2016, 2038) e cai pro ano do scanner/fallback
+  for (const badYear of ['3026', '2086', '2002', '2036', '2016', '2038']) {
+    assert.equal(
+      resolveZipMonthFolder({
+        suggestedName: `PROTOCOLO 14.11.${badYear}.pdf`,
+        fields: { ano: badYear },
+        originalName: 'doc11122420260925135247.pdf',
+      }, '2026'),
+      'NOV.2026'
+    );
+  }
 });
 
 test('api/extract.js: CORS para domínio customizado, métodos e autenticação', async () => {
