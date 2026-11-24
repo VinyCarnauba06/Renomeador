@@ -87,3 +87,23 @@ export async function renderPageToCanvas(page, scale){
   await page.render({ canvasContext: ctx, viewport }).promise;
   return canvas;
 }
+
+// Aplica rotação vetorial (sem perda de qualidade) às páginas de um PDF via pdf-lib.
+// Se rotationDeg for 0 ou inválido, devolve o arquivo original sem reescrever.
+export async function rotatePdfFileIfNeeded(file, rotationDeg){
+  const deg = ((Number(rotationDeg) || 0) % 360 + 360) % 360;
+  if (!deg || typeof PDFLib === 'undefined') return file;
+  try {
+    const bytes = await file.arrayBuffer();
+    const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+    for (const page of doc.getPages()){
+      const current = page.getRotation().angle || 0;
+      page.setRotation(PDFLib.degrees((current + deg) % 360));
+    }
+    const outBytes = await doc.save();
+    return new Blob([outBytes], { type: 'application/pdf' });
+  } catch (err){
+    console.warn('Falha ao rotacionar PDF no ZIP, usando original:', err);
+    return file;
+  }
+}

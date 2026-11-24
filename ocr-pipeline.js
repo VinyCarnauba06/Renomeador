@@ -373,10 +373,10 @@ function ocrLooksGood(text, confidence){
   for (const k of OCR_KEYWORDS){
     if (norm.includes(k)){
       hits++;
-      if (hits >= 2 && confidence >= 32) return true;
+      if (hits >= 2 && confidence >= 35) return true;
     }
   }
-  return hits >= 1 && confidence >= 40;
+  return hits >= 1 && confidence >= 55;
 }
 
 function ocrQualityScore(text, confidence){

@@ -94,11 +94,14 @@ function buildAiResult(ai, nativeText){
   const rawCondo = ai.condominio ? String(ai.condominio).trim() : null;
   const canonicalCondo = rawCondo ? (findCondominio(normalize(rawCondo)) || rawCondo.toUpperCase()) : undefined;
   const cleanName = sanitizeFilename(ai.nome_sugerido);
+  const rot = Number(ai.rotacao_necessaria);
+  const rotationUsed = [0, 90, 180, 270].includes(rot) ? rot : 0;
 
   return {
     nome: cleanName,
     confidence: typeof ai.confidence === 'number' ? Math.max(0, Math.min(1, ai.confidence)) : 0.85,
     ruleId: 'ai:' + (ai.tipo_documento || 'desconhecido'),
+    rotationUsed,
     fields: {
       ...findExtras(nativeText || ''),
       tipo: ai.tipo_documento ? String(ai.tipo_documento).replace(/_/g, ' ').toUpperCase() : undefined,

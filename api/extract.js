@@ -76,8 +76,11 @@ Responda SEMPRE e SOMENTE com um objeto JSON válido (sem markdown, sem texto an
   "categoria": "ex: AGUA, LUZ, GAS, CONDOMINIO, ALUGUEL, PIX, etc. ou null",
   "nome_sugerido": "NOME DE ARQUIVO JÁ FORMATADO, EM MAIÚSCULO, SEM EXTENSÃO",
   "confidence": 0.0 a 1.0,
+  "rotacao_necessaria": 0,
   "observacao": "opcional, texto curto só se algo for ambíguo"
 }
+
+IMPORTANTE sobre orientação: muitos documentos vêm escaneados de lado (90° ou 270°) ou de ponta-cabeça (180°). Leia o conteúdo normalmente mesmo rotacionado e informe em "rotacao_necessaria" quantos graus no sentido horário (0, 90, 180 ou 270) são necessários para deixar a página em pé e legível (0 se já estiver em pé).
 
 Convenções OBRIGATÓRIAS pra montar "nome_sugerido" (siga o padrão mais específico que se aplicar; todas em MAIÚSCULO, campos separados por espaço, sem acentos problemáticos, sem caracteres especiais de sistema de arquivos):
 - "PROTOCOLO {DD.MM}" — protocolo de entrega de boletos / setor boletos (sem condomínio, use a data da entrega/enviado)

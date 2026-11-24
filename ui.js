@@ -34,7 +34,7 @@ import {
   removeItemById,
   clearAllState,
 } from './state.js';
-import { escapeHtml, escapeAttr, stripPdfExt } from './pdf-utils.js';
+import { escapeHtml, escapeAttr, stripPdfExt, rotatePdfFileIfNeeded } from './pdf-utils.js';
 import { initPdfMerge, toggleMergeSelection, clearMergeQueue, renderMergePanel } from './pdf-merge.js';
 
 const drop = document.getElementById('drop');
@@ -59,6 +59,7 @@ const empty = document.getElementById('empty');
 const actionsBar = document.getElementById('actionsBar');
 const countEl = document.getElementById('count');
 const zipByMonthToggle = document.getElementById('zipByMonthToggle');
+const zipAutoRotateToggle = document.getElementById('zipAutoRotateToggle');
 const downloadBtn = document.getElementById('downloadBtn');
 const clearBtn = document.getElementById('clearBtn');
 const reviewBtn = document.getElementById('reviewBtn');
@@ -936,12 +937,16 @@ downloadBtn.addEventListener('click', async () => {
   try {
     const zip = new JSZip();
     const organizeByMonth = !zipByMonthToggle || zipByMonthToggle.checked;
+    const autoRotate = !zipAutoRotateToggle || zipAutoRotateToggle.checked;
     for (const row of items){
       if (row.status === 'processing') continue;
       const entryPath = organizeByMonth
         ? `${resolveZipMonthFolder(row)}/${row.suggestedName}`
         : row.suggestedName;
-      zip.file(entryPath, row.originalFile);
+      const content = autoRotate && row.rotationUsed
+        ? await rotatePdfFileIfNeeded(row.originalFile, row.rotationUsed)
+        : row.originalFile;
+      zip.file(entryPath, content);
     }
     // PDFs já são comprimidos: STORE evita desperdiçar CPU tentando recomprimir 400+ arquivos no navegador.
     const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
