@@ -115,7 +115,7 @@ function buildAiResult(ai, nativeText){
   };
 }
 
-const RETRYABLE_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+const RETRYABLE_HTTP_STATUSES = new Set([429, 503, 504]);
 const MAX_AI_ATTEMPTS = 3;
 
 function sleep(ms){
@@ -154,7 +154,11 @@ export async function extractWithAI(canvas, { hint, loteCondominio } = {}){
     }
     if (res.ok) return res.json();
 
-    lastError = new Error(`ai_http_${res.status}`);
+    const errJson = await res.json().catch(() => null);
+    const detailMsg = errJson
+      ? `${errJson.error || ''}${errJson.status ? ' (' + errJson.status + ')' : ''}${errJson.detail ? ': ' + String(errJson.detail).slice(0, 180) : ''}`
+      : '';
+    lastError = new Error(`ai_http_${res.status}${detailMsg ? ' — ' + detailMsg : ''}`);
     if (!RETRYABLE_HTTP_STATUSES.has(res.status) || attempt === MAX_AI_ATTEMPTS){
       throw lastError;
     }

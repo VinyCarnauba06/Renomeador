@@ -26,6 +26,7 @@ for (const extra of String(process.env.EXTRA_ALLOWED_ORIGINS || '').split(',')) 
 
 const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+const FALLBACK_GEMINI_MODEL = 'gemini-2.5-flash-lite';
 const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_HINT_LENGTH = 240;
@@ -101,8 +102,7 @@ Regras de confiança:
 
 Se a imagem não for um documento de condomínio (lixo, página em branco, foto não relacionada), responda com tipo_documento "nao_identificado", condominio null, nome_sugerido genérico e confidence 0.`;
 
-async function callGemini({ image, mimeType, userText }) {
-  const model = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+async function callGeminiModel({ model, image, mimeType, userText }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
   const aiRes = await fetch(url, {
     method: 'POST',
@@ -121,8 +121,11 @@ async function callGemini({ image, mimeType, userText }) {
       ],
       generationConfig: {
         temperature: 0.1,
-        maxOutputTokens: 1024,
+        maxOutputTokens: 2048,
         responseMimeType: 'application/json',
+        // Desliga thinking no Gemini 2.5 Flash — sem isso, os tokens de raciocínio consomem maxOutputTokens
+        // e truncam o JSON no meio (causando 502 ai_bad_output), além de deixar 3x mais lento.
+        thinkingConfig: { thinkingBudget: 0 },
       },
     }),
   });
@@ -132,10 +135,21 @@ async function callGemini({ image, mimeType, userText }) {
     retryAfter: aiRes.headers.get('retry-after'),
     getText: async () => {
       const data = await aiRes.json();
-      return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      return parts.filter(p => !p.thought && typeof p.text === 'string').map(p => p.text).join('');
     },
     getErrorDetail: () => aiRes.text().catch(() => ''),
   };
+}
+
+async function callGemini({ image, mimeType, userText }) {
+  const primaryModel = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+  const first = await callGeminiModel({ model: primaryModel, image, mimeType, userText });
+  // Se o modelo padrão bater em 429/404/503 e o usuário não fixou GEMINI_MODEL, tenta flash-lite automaticamente
+  if (!first.ok && !process.env.GEMINI_MODEL && (first.status === 429 || first.status === 404 || first.status === 503)) {
+    return callGeminiModel({ model: FALLBACK_GEMINI_MODEL, image, mimeType, userText });
+  }
+  return first;
 }
 
 async function callAnthropic({ image, mimeType, userText }) {
