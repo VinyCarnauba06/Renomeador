@@ -230,6 +230,87 @@ function numeroPorMesAbrev(abrev){
   return map[abrev] || null;
 }
 
+const MESES_ABREV_SET = new Set(["JAN","FEV","MAR","ABR","MAI","JUN","JUL","AGO","SET","OUT","NOV","DEZ"]);
+
+function normalizarMesAbrev(token){
+  if (!token) return null;
+  const up = normalize(String(token)).trim();
+  if (MESES_ABREV_SET.has(up)) return up;
+  return MESES[up] || null;
+}
+
+function extrairMesAnoDeTexto(str){
+  if (!str) return { mes: null, ano: null };
+  const norm = normalize(String(str).replace(/\.pdf$/i, ''));
+
+  // 1) "OUT 2026", "OUT/2026", "OUT.2026", "OUTUBRO 2026", "OUTUBRO/2026"
+  let m = norm.match(/\b([A-Z]{3,10})[\s./-]+(20\d{2})\b/);
+  if (m){
+    const mes = normalizarMesAbrev(m[1]);
+    if (mes) return { mes, ano: m[2] };
+  }
+
+  // 2) "DD.MM.AAAA", "DD/MM/AAAA", "DD-MM-AAAA"
+  m = norm.match(/\b([0-3]?\d)[./-]([0-1]?\d)[./-](20\d{2})\b/);
+  if (m && Number(m[1]) >= 1 && Number(m[1]) <= 31){
+    const mes = mesPorNumero(m[2].padStart(2, '0'));
+    if (mes) return { mes, ano: m[3] };
+  }
+
+  // 3) "DD.MM" ou "DD/MM" sem ano (ex.: "PROTOCOLO 08.10", "DARF VIVANT 20.11")
+  m = norm.match(/\b([0-3]?\d)[./-]([0-1]?\d)\b/);
+  if (m && Number(m[1]) >= 1 && Number(m[1]) <= 31){
+    const mes = mesPorNumero(m[2].padStart(2, '0'));
+    if (mes) return { mes, ano: null };
+  }
+
+  // 4) Mês por extenso isolado (ex.: "PROTOCOLO VIVANT JULHO")
+  for (const palavra of norm.split(/\s+/)){
+    if (palavra.length >= 4 && MESES[palavra]){
+      return { mes: MESES[palavra], ano: null };
+    }
+  }
+
+  return { mes: null, ano: null };
+}
+
+function extrairAnoDeNomeOriginal(originalName){
+  if (!originalName) return null;
+  // Padrão de scanner: doc11122420260925135247.pdf -> 2026
+  const m = String(originalName).match(/(20\d{2})(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])/);
+  return m ? m[1] : null;
+}
+
+// Resolve o nome da pasta mensal no ZIP (ex.: "OUT.2026", "NOV.2026" ou "SEM DATA").
+// Prioridade: nome final sugerido/editado -> campos extraídos -> texto OCR -> ano de fallback.
+export function resolveZipMonthFolder(row, fallbackYear = String(new Date().getFullYear())){
+  const f = (row && row.fields) || {};
+  const fromName = extrairMesAnoDeTexto(row && row.suggestedName);
+
+  let mes = fromName.mes
+    || normalizarMesAbrev(f.mes)
+    || normalizarMesAbrev(f.mesCompleto)
+    || extrairMesAnoDeTexto(f.mesAno).mes
+    || extrairMesAnoDeTexto(f.data).mes
+    || extrairMesAnoDeTexto(f.dataDDMM).mes;
+
+  let ano = fromName.ano
+    || (f.ano && /^20\d{2}$/.test(String(f.ano)) ? String(f.ano) : null)
+    || extrairMesAnoDeTexto(f.mesAno).ano
+    || extrairMesAnoDeTexto(f.data).ano;
+
+  // Se ainda faltou mês ou ano, tenta extrair do texto OCR/nativo
+  if ((!mes || !ano) && row && row.ocrText && !row.ocrText.startsWith('[PDF')){
+    const fromOcr = findData(row.ocrText);
+    if (!mes && fromOcr.mes) mes = fromOcr.mes;
+    if (!ano && fromOcr.ano) ano = fromOcr.ano;
+  }
+
+  if (!mes) return 'SEM DATA';
+  if (!ano) ano = extrairAnoDeNomeOriginal(row && row.originalName) || String(fallbackYear);
+  return `${mes}.${ano}`;
+}
+
 // Campos "extra" apenas informativos (não entram no nome, mas aparecem na conferência)
 export function findExtras(rawText){
   const extras = {};

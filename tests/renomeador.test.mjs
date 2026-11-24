@@ -23,7 +23,7 @@ const {
   items,
   mergeQueueIds,
 } = await import('../state.js');
-const { identifyDocument, findData, findCondominioFallback, setLoteHintProvider } = await import('../rules-engine.js');
+const { identifyDocument, findData, findCondominioFallback, setLoteHintProvider, resolveZipMonthFolder } = await import('../rules-engine.js');
 const { CONFIDENCE_THRESHOLD } = await import('../config.js');
 
 const require = createRequire(import.meta.url);
@@ -127,6 +127,24 @@ test('rules-engine: corte duro sem condomínio e uso da dica de lote', () => {
   assert.equal(comLote.nome, 'DARF VIVANT 20.08');
   assert.ok(comLote.confidence >= CONFIDENCE_THRESHOLD);
   setLoteHintProvider(() => null);
+});
+
+test('rules-engine: resolveZipMonthFolder organiza em pastas MES.AAAA ou SEM DATA', () => {
+  // Mês e ano direto no nome sugerido
+  assert.equal(resolveZipMonthFolder({ suggestedName: 'FATURA EQUATORIAL VIVANT OUT 2026 UC4567.pdf' }), 'OUT.2026');
+  // DD.MM no nome + ano nos campos ou no texto OCR
+  assert.equal(resolveZipMonthFolder({ suggestedName: 'DARF VIVANT 20.11.pdf', fields: { ano: '2026' } }), 'NOV.2026');
+  // DD.MM no nome + ano vindo do timestamp do scanner no arquivo original
+  assert.equal(resolveZipMonthFolder({ suggestedName: 'PROTOCOLO 08.10.pdf', originalName: 'doc11122420260925135247.pdf' }), 'OUT.2026');
+  // Edição manual no nome tem prioridade sobre fields antigos
+  assert.equal(resolveZipMonthFolder({ suggestedName: 'RECIBO VIVANT 15.11.2026.pdf', fields: { mes: 'OUT', ano: '2026' } }), 'NOV.2026');
+  // Campos da IA (mesAno / data)
+  assert.equal(resolveZipMonthFolder({ suggestedName: 'COMPROVANTE VIVANT.pdf', fields: { data: '05/12/2026' } }), 'DEZ.2026');
+  assert.equal(resolveZipMonthFolder({ suggestedName: 'EXTRATO VIVANT.pdf', fields: { mesAno: 'AGO/2026' } }), 'AGO.2026');
+  // Mês por extenso no nome (lista_proprietarios_taxa)
+  assert.equal(resolveZipMonthFolder({ suggestedName: 'PROTOCOLO VIVANT JULHO.pdf', fields: { ano: '2026' } }), 'JUL.2026');
+  // Sem nenhuma data identificável
+  assert.equal(resolveZipMonthFolder({ suggestedName: 'PROTOCOLO RESERVA VIVANT.pdf', fields: {} }), 'SEM DATA');
 });
 
 test('api/extract.js: CORS para domínio customizado, métodos e autenticação', async () => {

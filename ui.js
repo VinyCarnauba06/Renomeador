@@ -11,6 +11,7 @@ import {
   learnedCondominios,
   saveLearnedCondominios,
   setLoteHintProvider,
+  resolveZipMonthFolder,
 } from './rules-engine.js';
 import {
   identifyDocumentSmart,
@@ -56,6 +57,7 @@ const resultsBody = document.getElementById('resultsBody');
 const empty = document.getElementById('empty');
 const actionsBar = document.getElementById('actionsBar');
 const countEl = document.getElementById('count');
+const zipByMonthToggle = document.getElementById('zipByMonthToggle');
 const downloadBtn = document.getElementById('downloadBtn');
 const clearBtn = document.getElementById('clearBtn');
 const reviewBtn = document.getElementById('reviewBtn');
@@ -806,9 +808,13 @@ downloadBtn.addEventListener('click', async () => {
   downloadBtn.textContent = 'GERANDO ZIP...';
   try {
     const zip = new JSZip();
+    const organizeByMonth = !zipByMonthToggle || zipByMonthToggle.checked;
     for (const row of items){
       if (row.status === 'processing') continue;
-      zip.file(row.suggestedName, row.originalFile);
+      const entryPath = organizeByMonth
+        ? `${resolveZipMonthFolder(row)}/${row.suggestedName}`
+        : row.suggestedName;
+      zip.file(entryPath, row.originalFile);
     }
     // PDFs já são comprimidos: STORE evita desperdiçar CPU tentando recomprimir 400+ arquivos no navegador.
     const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
