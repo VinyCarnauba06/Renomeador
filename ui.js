@@ -46,6 +46,7 @@ const progressFill = document.getElementById('progressFill');
 const cancelBatchBtn = document.getElementById('cancelBatchBtn');
 const filterBar = document.getElementById('filterBar');
 const searchInput = document.getElementById('searchInput');
+const reprocessFilteredBtn = document.getElementById('reprocessFilteredBtn');
 const countAllEl = document.getElementById('countAll');
 const countPendingEl = document.getElementById('countPending');
 const countLowEl = document.getElementById('countLow');
@@ -481,6 +482,23 @@ function applyFilterToRow(r){
   tr.classList.toggle('hiddenRow', !rowMatchesFilter(r, query));
 }
 
+function getFilteredReprocessableRows(){
+  const query = (searchInput ? searchInput.value : '').trim().toLowerCase();
+  if (!query && activeFilter === 'all') return [];
+  return items.filter(r => r.status !== 'processing' && !r.merged && rowMatchesFilter(r, query));
+}
+
+function updateReprocessFilteredBtn(){
+  if (!reprocessFilteredBtn) return;
+  const targets = getFilteredReprocessableRows();
+  if (targets.length > 0 && !isBatchRunning){
+    reprocessFilteredBtn.style.display = 'inline-block';
+    reprocessFilteredBtn.textContent = `🔄 REPROCESSAR FILTRADOS (${targets.length})`;
+  } else {
+    reprocessFilteredBtn.style.display = 'none';
+  }
+}
+
 function applyFilters(){
   const query = (searchInput ? searchInput.value : '').trim().toLowerCase();
   for (const r of items){
@@ -488,6 +506,7 @@ function applyFilters(){
     if (!tr) continue;
     tr.classList.toggle('hiddenRow', !rowMatchesFilter(r, query));
   }
+  updateReprocessFilteredBtn();
 }
 
 document.querySelectorAll('.filterBtn').forEach(btn => {
@@ -804,75 +823,112 @@ function updateCount(){
   } else {
     reviewBtn.style.display = 'none';
   }
+  updateReprocessFilteredBtn();
 }
 
 /* ============================================================
-   REVISÃO PROFUNDA, DOWNLOAD ZIP & NOVO LOTE
+   REVISÃO PROFUNDA, REPROCESSAR FILTRADOS, DOWNLOAD ZIP & NOVO LOTE
    ============================================================ */
 
-reviewBtn.addEventListener('click', async () => {
-  const pending = reviewableRows();
-  if (!pending.length) return;
+async function runReviewBatch(targets, { force = false, labelPrefix = 'Revisando' } = {}){
+  if (!targets.length || isBatchRunning) return;
 
+  isBatchRunning = true;
+  cancelRequested = false;
+  batchStartTime = Date.now();
+  acquireWakeLock();
   reviewBtn.disabled = true;
+  if (reprocessFilteredBtn) reprocessFilteredBtn.disabled = true;
   clearBtn.disabled = true;
   downloadBtn.disabled = true;
   progressWrap.style.display = 'block';
+  cancelBatchBtn.style.display = 'inline-block';
+  cancelBatchBtn.disabled = false;
+  cancelBatchBtn.textContent = 'PARAR LOTE';
 
   let done = 0;
-  const total = pending.length;
-  progressLabel.textContent = `Revisando ${done} de ${total} documento(s) de baixa confiança...`;
+  const total = targets.length;
+  progressLabel.textContent = `${labelPrefix} ${done} de ${total} documento(s)...`;
   progressFill.style.width = '0%';
 
-  for (const row of pending){
-    const statusAntesDaRevisao = row.status;
-    row.status = 'processing';
-    renderRow(row);
-    try {
-      const improved = await reviewDocumentSmart(row);
-      if (improved && improved.result && improved.result.nome){
-        releaseName(row.suggestedName);
-        row.ocrText = improved.text;
-        row.ocrConfidencePct = improved.ocrConfidence != null ? Math.round(improved.ocrConfidence * 100) : null;
-        row.rotationUsed = improved.rotationUsed;
-        if (improved.usedAI) row.usedAI = true;
-        else row.usedOCR = true;
-        row.fields = improved.result.fields;
-        row.ruleId = improved.result.ruleId;
-        row.suggestedName = reserveUniqueName(improved.result.nome);
-        row.confidence = improved.result.confidence;
-        row.status = improved.result.confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
-        row.reviewed = true;
-      } else if (improved){
-        row.ocrText = improved.text;
-        row.ocrConfidencePct = improved.ocrConfidence != null ? Math.round(improved.ocrConfidence * 100) : null;
-        row.rotationUsed = improved.rotationUsed;
-        row.reviewed = true;
-        row.status = statusAntesDaRevisao;
-      } else {
+  try {
+    for (const row of targets){
+      if (cancelRequested) break;
+      const statusAntesDaRevisao = row.status;
+      row.status = 'processing';
+      renderRow(row);
+      try {
+        const improved = await reviewDocumentSmart(row, { force });
+        if (improved && improved.result && improved.result.nome){
+          releaseName(row.suggestedName);
+          row.ocrText = improved.text;
+          row.ocrConfidencePct = improved.ocrConfidence != null ? Math.round(improved.ocrConfidence * 100) : null;
+          row.rotationUsed = improved.rotationUsed;
+          if (improved.usedAI) row.usedAI = true;
+          else row.usedOCR = true;
+          row.fields = improved.result.fields;
+          row.ruleId = improved.result.ruleId;
+          row.suggestedName = reserveUniqueName(improved.result.nome);
+          row.confidence = improved.result.confidence;
+          row.manualEdit = false;
+          row.status = improved.result.confidence >= CONFIDENCE_THRESHOLD ? 'ok' : 'low';
+          row.reviewed = true;
+        } else if (improved){
+          row.ocrText = improved.text;
+          row.ocrConfidencePct = improved.ocrConfidence != null ? Math.round(improved.ocrConfidence * 100) : null;
+          row.rotationUsed = improved.rotationUsed;
+          row.reviewed = true;
+          row.status = statusAntesDaRevisao;
+        } else {
+          row.reviewed = true;
+          row.status = statusAntesDaRevisao;
+        }
+      } catch (err){
+        console.error(err);
         row.reviewed = true;
         row.status = statusAntesDaRevisao;
       }
-    } catch (err){
-      console.error(err);
-      row.reviewed = true;
-      row.status = statusAntesDaRevisao;
+      done++;
+      const pct = Math.round((done / total) * 100);
+      progressLabel.textContent = `${labelPrefix} ${done} de ${total} (${pct}%)${formatEta(done, total)}`;
+      progressFill.style.width = pct + '%';
+      renderRow(row);
     }
-    done++;
-    progressLabel.textContent = `Revisando ${done} de ${total} documento(s) de baixa confiança...`;
-    progressFill.style.width = Math.round((done / total) * 100) + '%';
-    renderRow(row);
+  } finally {
+    isBatchRunning = false;
+    batchStartTime = 0;
+    releaseWakeLock();
+    cancelBatchBtn.style.display = 'none';
+    reviewBtn.disabled = false;
+    if (reprocessFilteredBtn) reprocessFilteredBtn.disabled = false;
+    clearBtn.disabled = false;
+    downloadBtn.disabled = false;
   }
 
-  progressLabel.textContent = `Revisão concluída: ${total} documento(s) reprocessado(s).`;
+  progressLabel.textContent = cancelRequested
+    ? `Reprocessamento interrompido: ${done} de ${total} documento(s).`
+    : `Concluído: ${done} documento(s) reprocessado(s).`;
+  cancelRequested = false;
   reorderTable();
   applyFilters();
-  reviewBtn.disabled = false;
-  clearBtn.disabled = false;
-  downloadBtn.disabled = false;
   updateCount();
   updateAiStatusButton();
+}
+
+reviewBtn.addEventListener('click', () => {
+  runReviewBatch(reviewableRows(), { force: false, labelPrefix: 'Revisando baixa confiança' });
 });
+
+if (reprocessFilteredBtn){
+  reprocessFilteredBtn.addEventListener('click', () => {
+    const targets = getFilteredReprocessableRows();
+    if (!targets.length) return;
+    if (targets.length > 10 && !confirm(`Reprocessar ${targets.length} documento(s) filtrados agora?`)){
+      return;
+    }
+    runReviewBatch(targets, { force: true, labelPrefix: 'Reprocessando filtrados' });
+  });
+}
 
 downloadBtn.addEventListener('click', async () => {
   downloadBtn.disabled = true;

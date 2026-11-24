@@ -41,6 +41,7 @@ button.dangerBtn{border-color:rgba(231,76,60,.45);color:var(--err);padding:4px 1
 
 .filterBar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:20px;}
 .filterTabs{display:flex;gap:6px;flex-wrap:wrap;}
+.filterRight{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 .filterBtn.active{border-color:var(--accent);color:var(--accent);background:#182036;}
 .searchInput{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px;min-width:240px;}
 

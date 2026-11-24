@@ -74,7 +74,10 @@
       <button type="button" class="secondary filterBtn" data-filter="error">✕ Erros (<span id="countError">0</span>)</button>
       <button type="button" class="secondary filterBtn" data-filter="ok">✓ Prontos (<span id="countOk">0</span>)</button>
     </div>
-    <input type="search" id="searchInput" class="searchInput" placeholder="Filtrar por nome ou condomínio...">
+    <div class="filterRight">
+      <input type="search" id="searchInput" class="searchInput" placeholder="Filtrar por nome ou condomínio...">
+      <button type="button" id="reprocessFilteredBtn" class="secondary" style="display:none">🔄 REPROCESSAR FILTRADOS</button>
+    </div>
   </div>
 
   <table id="resultsTable" style="display:none">

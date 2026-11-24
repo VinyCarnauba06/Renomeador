@@ -222,10 +222,11 @@ export async function identifyDocumentSmart(file){
   }
 }
 
-// Revisão sob demanda para documentos com baixa confiança / não identificados:
-// tenta IA em resolução maior (3.5x) primeiro se configurada; senão (ou se falhar), roda OCR profundo local.
-export async function reviewDocumentSmart(row){
-  if (!row.usedOCR && !row.usedAI){
+// Revisão sob demanda para documentos com baixa confiança / não identificados (ou forçada pelo usuário via
+// "Reprocessar filtrados"): tenta IA em resolução maior (3.5x) com hint (ignora cache SHA-256) primeiro se
+// configurada; senão (ou se falhar), roda OCR profundo local.
+export async function reviewDocumentSmart(row, { force = false } = {}){
+  if (!force && !row.usedOCR && !row.usedAI){
     return null; // texto nativo já foi lido sem erro de OCR
   }
 
